@@ -1,9 +1,13 @@
 """
 App Streamlit - Generador REP_2 (Costos y Gastos por Familia de Servicios)
 
-Sube GRH_8.xlsx y GRH_11.xlsx (y opcionalmente la plantilla REP_2.xlsx con el
-diccionario de atributos SISS) y la app arma la tabla REP_2 lista para
-descargar, con validaciones de cuadratura incluidas.
+Consolida 3 familias de gasto:
+  - GRH: Gastos de Recursos Humanos           (GRH_8 + GRH_11)
+  - GCP: Gastos Generales de Personal         (GCP_4 + GCP_5, ya abierta por recurso)
+  - GGV: Gastos Generales Vehículos y Equipos (GGV_4 + GGV_5)
+
+Sube los archivos correspondientes y la app arma la tabla REP_2 consolidada,
+lista para descargar, con validaciones de cuadratura por cada familia.
 """
 
 import io
@@ -33,65 +37,127 @@ def read_rows(file_bytes):
     return list(ws.iter_rows(min_row=2, values_only=True))
 
 
-def build_rep2(grh8_bytes, grh11_bytes):
-    rows8 = read_rows(grh8_bytes)
-    rows11 = read_rows(grh11_bytes)
+def familia(cod_servicio):
+    return cod_servicio // 100
 
-    # Shares por (persona,cargo): TODOS los servicios (regulados y no regulados)
-    shares = defaultdict(list)
-    for r in rows11:
-        cod_reg, cod_noreg, pct = r[7], r[8], r[9]
-        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
-        shares[(r[4], r[5])].append((cod_serv, pct))
+
+def build_rep2(grh8_bytes, grh11_bytes, gcp4_bytes, gcp5_bytes, ggv4_bytes, ggv5_bytes):
+    grh8 = read_rows(grh8_bytes)
+    grh11 = read_rows(grh11_bytes)
+    gcp4 = read_rows(gcp4_bytes)
+    gcp5 = read_rows(gcp5_bytes)
+    ggv4 = read_rows(ggv4_bytes)
+    ggv5 = read_rows(ggv5_bytes)
 
     agg = defaultdict(lambda: [0.0, 0.0])
-    for r in rows8:
+
+    # --- GRH: % de dedicación por (persona,cargo) desde GRH_11 -------------
+    shares_persona = defaultdict(list)
+    for r in grh11:
+        cod_reg, cod_noreg, pct = r[7], r[8], r[9]
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        shares_persona[(r[4], r[5])].append((cod_serv, pct))
+
+    for r in grh8:
         empresa, periodo, anio, sector, persona, cargo, cod_recurso, monto_anual, monto_act, pct_act, total_gasto = r
-        for cod_serv, pct in shares.get((persona, cargo), []):
-            familia = cod_serv // 100
-            k = (empresa, periodo, anio, sector, cod_recurso, familia)
+        for cod_serv, pct in shares_persona.get((persona, cargo), []):
+            fam = familia(cod_serv)
+            k = (empresa, periodo, anio, sector, cod_recurso, fam)
             agg[k][0] += total_gasto * pct
             agg[k][1] += monto_act * pct
 
-    tot_no_act_recurso = defaultdict(float)
-    tot_act_recurso = defaultdict(float)
-    for (empresa, periodo, anio, sector, cod_recurso, familia), (gasto, act) in agg.items():
-        tot_no_act_recurso[cod_recurso] += gasto
-        tot_act_recurso[cod_recurso] += act
+    # --- GCP: GCP_5 ya viene abierta por recurso y servicio -----------------
+    # Gasto NO activado: directo desde GCP_5 (ya es el monto asignado)
+    for r in gcp5:
+        empresa, periodo, anio, sector, persona, cargo, cod_recurso, gasto_no_act, cod_reg, cod_noreg, pct = r
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        fam = familia(cod_serv)
+        k = (empresa, periodo, anio, sector, cod_recurso, fam)
+        agg[k][0] += gasto_no_act
+
+    # Monto activado: usa el % de GCP_5 (persona,cargo,recurso) aplicado a GCP_4
+    shares_gcp_recurso = defaultdict(list)
+    for r in gcp5:
+        empresa, periodo, anio, sector, persona, cargo, cod_recurso, gasto_no_act, cod_reg, cod_noreg, pct = r
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        shares_gcp_recurso[(persona, cargo, cod_recurso)].append((cod_serv, pct))
+
+    for r in gcp4:
+        empresa, periodo, anio, sector, persona, cargo, cod_recurso, monto_anual, monto_act, pct_act, total_gasto = r
+        if monto_act == 0:
+            continue
+        for cod_serv, pct in shares_gcp_recurso.get((persona, cargo, cod_recurso), []):
+            fam = familia(cod_serv)
+            k = (empresa, periodo, anio, sector, cod_recurso, fam)
+            agg[k][1] += monto_act * pct
+
+    # --- GGV: % de dedicación por ID Activo desde GGV_5 ---------------------
+    shares_activo = defaultdict(list)
+    for r in ggv5:
+        empresa, periodo, anio, sector, id_activo, total_no_act, cod_reg, cod_noreg, pct = r[:9]
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        shares_activo[id_activo].append((cod_serv, pct))
+
+    for r in ggv4:
+        empresa, periodo, anio, sector, id_activo, cod_recurso, monto_anual, monto_act, pct_act, total_gasto = r[:10]
+        for cod_serv, pct in shares_activo.get(id_activo, []):
+            fam = familia(cod_serv)
+            k = (empresa, periodo, anio, sector, cod_recurso, fam)
+            agg[k][0] += total_gasto * pct
+            agg[k][1] += monto_act * pct
+
+    # --- Normalizar % por recurso -------------------------------------------
+    tot_no_act = defaultdict(float)
+    tot_act = defaultdict(float)
+    for (empresa, periodo, anio, sector, cod_recurso, fam), (g, a) in agg.items():
+        tot_no_act[cod_recurso] += g
+        tot_act[cod_recurso] += a
 
     final_rows = []
-    for (empresa, periodo, anio, sector, cod_recurso, familia), (gasto, act) in sorted(
+    for (empresa, periodo, anio, sector, cod_recurso, fam), (g, a) in sorted(
             agg.items(), key=lambda x: (x[0][4], x[0][5])):
-        if abs(gasto) < 1e-9 and abs(act) < 1e-9:
+        if abs(g) < 1e-9 and abs(a) < 1e-9:
             continue
-        pct_no_act = gasto / tot_no_act_recurso[cod_recurso] if tot_no_act_recurso[cod_recurso] else 0.0
-        pct_act = act / tot_act_recurso[cod_recurso] if tot_act_recurso[cod_recurso] else 0.0
+        pct_no_act = g / tot_no_act[cod_recurso] if tot_no_act[cod_recurso] else 0.0
+        pct_act = a / tot_act[cod_recurso] if tot_act[cod_recurso] else 0.0
         final_rows.append([
-            empresa, periodo, anio, sector, cod_recurso, familia,
-            round(pct_no_act, 4) if gasto > 0 else 0.0,
-            round(gasto, 2),
-            round(pct_act, 4) if act > 0 else 0.0,
-            round(act, 2),
+            empresa, periodo, anio, sector, cod_recurso, fam,
+            round(pct_no_act, 4) if g > 0 else 0.0, round(g, 2),
+            round(pct_act, 4) if a > 0 else 0.0, round(a, 2),
         ])
 
-    sum_gasto = sum(r[7] for r in final_rows)
-    sum_grh8_total = sum(r[10] for r in rows8)
+    # --- Validaciones por familia --------------------------------------------
+    recursos_grh = set(r[6] for r in grh8)
+    recursos_gcp = set(r[6] for r in gcp4)
+    recursos_ggv = set(r[5] for r in ggv4)
 
-    sum_act = sum(r[9] for r in final_rows)
-    sum_grh8_act = sum(r[8] for r in rows8)
+    def validar(recursos, sum_gasto_fuente, sum_act_fuente):
+        sum_gasto_rep2 = sum(r[7] for r in final_rows if r[4] in recursos)
+        sum_act_rep2 = sum(r[9] for r in final_rows if r[4] in recursos)
+        return {
+            "gasto_rep2": sum_gasto_rep2, "gasto_fuente": sum_gasto_fuente,
+            "diff_gasto": sum_gasto_rep2 - sum_gasto_fuente,
+            "act_rep2": sum_act_rep2, "act_fuente": sum_act_fuente,
+            "diff_act": sum_act_rep2 - sum_act_fuente,
+        }
 
     checks = {
-        "sum_gasto_rep2": sum_gasto,
-        "sum_gasto_grh8": sum_grh8_total,
-        "diff_gasto": sum_gasto - sum_grh8_total,
-        "sum_act_rep2": sum_act,
-        "sum_act_grh8": sum_grh8_act,
-        "diff_act": sum_act - sum_grh8_act,
+        "GRH": validar(recursos_grh, sum(r[10] for r in grh8), sum(r[8] for r in grh8)),
+        "GCP": validar(recursos_gcp, sum(r[10] for r in gcp4), sum(r[8] for r in gcp4)),
+        "GGV": validar(recursos_ggv, sum(r[9] for r in ggv4), sum(r[7] for r in ggv4)),
     }
-    return final_rows, checks
+    familia_map = {}
+    for c in recursos_grh:
+        familia_map[c] = "GRH - Gastos Recursos Humanos"
+    for c in recursos_gcp:
+        familia_map[c] = "GCP - Gastos Generales de Personal"
+    for c in recursos_ggv:
+        familia_map[c] = "GGV - Gastos Generales Vehículos y Equipos"
+
+    return final_rows, checks, familia_map
 
 
-def build_excel(final_rows, template_bytes=None):
+def build_excel(final_rows, familia_map, template_bytes=None):
     if template_bytes is not None:
         tmp = io.BytesIO(template_bytes)
         wb = openpyxl.load_workbook(tmp)
@@ -137,6 +203,36 @@ def build_excel(final_rows, template_bytes=None):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
 
+    # Hoja resumen por familia de gasto
+    ws2 = wb.create_sheet("Resumen_por_familia_gasto")
+    ws2.append(["Familia de Gasto", "GASTO ANUAL (no activado)", "MONTO ACTIVADO", "TOTAL"])
+    for c in range(1, 5):
+        cell = ws2.cell(row=1, column=c)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    resumen = defaultdict(lambda: [0.0, 0.0])
+    for row in final_rows:
+        fg = familia_map.get(row[4], "Otro")
+        resumen[fg][0] += row[7]
+        resumen[fg][1] += row[9]
+
+    for fg, (g, a) in resumen.items():
+        ws2.append([fg, round(g, 2), round(a, 2), round(g + a, 2)])
+
+    for r in range(2, ws2.max_row + 1):
+        for c in range(1, 5):
+            cell = ws2.cell(row=r, column=c)
+            cell.font = data_font
+            cell.border = border
+            if c in (2, 3, 4):
+                cell.number_format = '#,##0;(#,##0);"-"'
+    ws2.column_dimensions["A"].width = 42
+    for col in ["B", "C", "D"]:
+        ws2.column_dimensions[col].width = 20
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -146,55 +242,77 @@ def build_excel(final_rows, template_bytes=None):
 # ---------------------------------------------------------------- UI --------
 st.title("Generador REP_2 · Costos y Gastos por Familia de Servicios")
 st.caption(
-    "Cruza GRH_8 (gasto por recurso) con GRH_11 (% de dedicación a servicios "
-    "regulados) para construir la tabla REP_2 exigida por la SISS."
+    "Consolida las familias de gasto GRH (Recursos Humanos), GCP (Gastos "
+    "Generales de Personal) y GGV (Vehículos y Equipos) en la tabla REP_2 "
+    "exigida por la SISS."
 )
 
 with st.sidebar:
     st.header("Archivos de entrada")
-    f_grh8 = st.file_uploader("GRH_8.xlsx", type="xlsx")
-    f_grh11 = st.file_uploader("GRH_11.xlsx", type="xlsx")
-    f_template = st.file_uploader("REP_2.xlsx (plantilla/diccionario, opcional)", type="xlsx")
-    run = st.button("Generar REP_2", type="primary", disabled=not (f_grh8 and f_grh11))
+    st.markdown("**GRH — Recursos Humanos**")
+    f_grh8 = st.file_uploader("GRH_8.xlsx", type="xlsx", key="grh8")
+    f_grh11 = st.file_uploader("GRH_11.xlsx", type="xlsx", key="grh11")
+    st.markdown("**GCP — Gastos Generales de Personal**")
+    f_gcp4 = st.file_uploader("GCP_4.xlsx", type="xlsx", key="gcp4")
+    f_gcp5 = st.file_uploader("GCP_5.xlsx", type="xlsx", key="gcp5")
+    st.markdown("**GGV — Vehículos y Equipos**")
+    f_ggv4 = st.file_uploader("GGV_4.xlsx", type="xlsx", key="ggv4")
+    f_ggv5 = st.file_uploader("GGV_5.xlsx", type="xlsx", key="ggv5")
+    st.markdown("**Plantilla (opcional)**")
+    f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
+
+    all_ready = all([f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5])
+    run = st.button("Generar REP_2", type="primary", disabled=not all_ready)
 
 st.markdown(
     """
 **Lógica aplicada**
-1. GRH_8 entrega el gasto por (ID Persona, ID Cargo, Código Recurso).
-2. GRH_11 entrega el % de dedicación de cada persona a **todos** sus servicios
-   (regulados y no regulados) — cada fila trae un código en una de las dos
-   columnas de servicio y su % asociado.
-3. Ese % se aplica a los montos de GRH_8 (no activado y activado) de esa
-   persona, ya que GRH_11 no abre por recurso.
-4. Familia de Servicio = primeros 2 dígitos del código de servicio
-   (regulado o no regulado, ej: 1101→11, 2201→22).
-5. Se agrega por (Código Recurso, Familia) y se recalculan los % para que
-   sumen 100% dentro de cada recurso, cubriendo el 100% del gasto de GRH_8.
+- **GRH**: el % de dedicación de cada persona a cada servicio (GRH_11, a
+  nivel persona, filas regulado + no regulado) se aplica a los montos de
+  GRH_8.
+- **GCP**: GCP_5 ya viene abierta por (persona, cargo, **recurso**) y
+  servicio — el gasto no activado se toma directo de ahí. El monto activado
+  (de GCP_4) se reparte usando el mismo % de GCP_5, ahora a nivel de recurso.
+- **GGV**: el % de dedicación de cada activo (GGV_5) se aplica a los montos
+  de GGV_4, misma lógica que GRH pero a nivel de ID Activo.
+- Familia de Servicio = primeros 2 dígitos del código de servicio.
+- Se agrega todo por (Código Recurso, Familia) y se recalculan los % para
+  que sumen 100% dentro de cada recurso.
     """
 )
 
 if run:
     try:
-        final_rows, checks = build_rep2(f_grh8.getvalue(), f_grh11.getvalue())
+        final_rows, checks, familia_map = build_rep2(
+            f_grh8.getvalue(), f_grh11.getvalue(),
+            f_gcp4.getvalue(), f_gcp5.getvalue(),
+            f_ggv4.getvalue(), f_ggv5.getvalue()
+        )
     except Exception as e:
         st.error(f"Error procesando los archivos: {e}")
         st.stop()
 
     df = pd.DataFrame(final_rows, columns=HEADERS)
+    st.success(f"REP_2 generado con {len(df)} filas (3 familias de gasto consolidadas).")
 
-    st.success(f"REP_2 generado con {len(df)} filas.")
+    st.subheader("Validación de cuadratura por familia de gasto")
+    cols = st.columns(3)
+    all_ok = True
+    for col, (fam, chk) in zip(cols, checks.items()):
+        with col:
+            st.markdown(f"**{fam}**")
+            st.metric("Diferencia GASTO ANUAL", f"{chk['diff_gasto']:,.2f}")
+            st.metric("Diferencia MONTO ACTIVADO", f"{chk['diff_act']:,.2f}")
+            if abs(chk["diff_gasto"]) > 1 or abs(chk["diff_act"]) > 1:
+                all_ok = False
+                st.warning("Diferencia > $1")
+            else:
+                st.info("Cuadratura OK")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Diferencia GASTO ANUAL vs GRH_8 (no activado)", f"{checks['diff_gasto']:,.2f}")
-    with c2:
-        st.metric("Diferencia MONTO ACTIVADO vs GRH_8", f"{checks['diff_act']:,.2f}")
+    if not all_ok:
+        st.warning("Alguna familia presenta una diferencia de cuadratura mayor a $1. Revisa los archivos fuente.")
 
-    if abs(checks["diff_gasto"]) > 1 or abs(checks["diff_act"]) > 1:
-        st.warning("Hay una diferencia de cuadratura mayor a $1. Revisa los archivos fuente.")
-    else:
-        st.info("Cuadratura OK: el 100% del gasto de GRH_8 (regulado + no regulado) quedó repartido en REP_2.")
-
+    st.subheader("Detalle REP_2")
     st.dataframe(
         df.style.format({
             "% NO ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2%}",
@@ -205,7 +323,7 @@ if run:
         use_container_width=True,
     )
 
-    excel_bytes = build_excel(final_rows, f_template.getvalue() if f_template else None)
+    excel_bytes = build_excel(final_rows, familia_map, f_template.getvalue() if f_template else None)
     st.download_button(
         "Descargar REP_2.xlsx",
         data=excel_bytes,
@@ -213,4 +331,4 @@ if run:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 else:
-    st.info("Sube GRH_8.xlsx y GRH_11.xlsx en el panel izquierdo y presiona **Generar REP_2**.")
+    st.info("Sube los 6 archivos requeridos en el panel izquierdo y presiona **Generar REP_2**.")
