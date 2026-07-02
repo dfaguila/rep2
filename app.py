@@ -25,6 +25,8 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.chart import LineChart, BarChart, Reference
+from openpyxl.formatting.rule import ColorScaleRule
 
 st.set_page_config(page_title="Generador REP_2 - Suralis", layout="wide")
 
@@ -1182,6 +1184,10 @@ if run:
     st.success(f"REP_2 generado con {len(df)} filas.")
     st.session_state['last_final_rows'] = final_rows
     st.session_state['last_familia_map'] = familia_map
+    st.session_state['last_by_recurso_planas'] = by_recurso_planas
+    st.session_state['last_gpa_detalle'] = gpa_detalle
+    st.session_state['last_params_by_familia'] = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
+    st.session_state['last_avisos'] = avisos
 
     if avisos:
         with st.expander(f"⚠️ Avisos de carga ({len(avisos)})", expanded=True):
@@ -1381,3 +1387,159 @@ else:
         "(|z|>2) sobre el propio histórico de cada grupo; para series más "
         "cortas se marca si la variación supera 50%."
     )
+
+    # --- Descarga del Excel completo (REP_2 + Panel de Visualización) ------
+    st.divider()
+    if 'last_final_rows' not in st.session_state:
+        st.info("Genera el REP_2 del año actual arriba para poder descargar el Excel con el panel de visualización incluido.")
+    else:
+        if st.button("📥 Preparar Excel con Panel de Visualización (REP_2 + evolución histórica)"):
+            excel_base = build_excel(
+                st.session_state['last_final_rows'],
+                st.session_state['last_familia_map'],
+                st.session_state['last_by_recurso_planas'],
+                st.session_state['last_params_by_familia'],
+                gpa_detalle=st.session_state.get('last_gpa_detalle'),
+                avisos=st.session_state.get('last_avisos'),
+                template_bytes=f_template.getvalue() if 'f_template' in dir() and f_template else None,
+            )
+            wb_completo = openpyxl.load_workbook(excel_base)
+
+            header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+            header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+            data_font = Font(name="Arial", size=10)
+            thin = Side(style="thin", color="D9D9D9")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            ws5 = wb_completo.create_sheet("Evolucion_Familia_Gasto")
+            ws5.append(["Familia de Gasto"] + [str(a) for a in anios_disponibles])
+            for c in range(1, len(anios_disponibles) + 2):
+                cell = ws5.cell(row=1, column=c)
+                cell.font = header_font; cell.fill = header_fill; cell.border = border
+                cell.alignment = Alignment(horizontal="center")
+            for fam_k in sorted(evol_familia.keys()):
+                ws5.append([fam_k] + [round(evol_familia[fam_k].get(a, 0), 2) for a in anios_disponibles])
+            for r in range(2, ws5.max_row + 1):
+                for c in range(1, len(anios_disponibles) + 2):
+                    cell = ws5.cell(row=r, column=c)
+                    cell.font = data_font; cell.border = border
+                    if c > 1:
+                        cell.number_format = '#,##0;(#,##0);"-"'
+            ws5.column_dimensions["A"].width = 40
+            for c in range(2, len(anios_disponibles) + 2):
+                ws5.column_dimensions[get_column_letter(c)].width = 16
+            if ws5.max_row > 1 and len(anios_disponibles) > 1:
+                chart1 = LineChart()
+                chart1.title = "Evolución del Gasto por Familia"
+                chart1.y_axis.title = "Gasto Anual ($)"
+                chart1.x_axis.title = "Año"
+                data_ref = Reference(ws5, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws5.max_row)
+                cats_ref = Reference(ws5, min_col=1, min_row=2, max_row=ws5.max_row)
+                chart1.add_data(data_ref, titles_from_data=True)
+                chart1.set_categories(cats_ref)
+                chart1.width = 26; chart1.height = 12
+                ws5.add_chart(chart1, f"A{ws5.max_row + 3}")
+
+            ws6 = wb_completo.create_sheet("Evolucion_Recurso")
+            ws6.append(["Código Recurso", "Nombre Recurso"] + [str(a) for a in anios_disponibles])
+            for c in range(1, len(anios_disponibles) + 3):
+                cell = ws6.cell(row=1, column=c)
+                cell.font = header_font; cell.fill = header_fill; cell.border = border
+                cell.alignment = Alignment(horizontal="center")
+            for cod in sorted(evol_recurso.keys()):
+                ws6.append([cod, nombre_recurso(cod)] + [round(evol_recurso[cod].get(a, 0), 2) for a in anios_disponibles])
+            for r in range(2, ws6.max_row + 1):
+                for c in range(1, len(anios_disponibles) + 3):
+                    cell = ws6.cell(row=r, column=c)
+                    cell.font = data_font; cell.border = border
+                    if c > 2:
+                        cell.number_format = '#,##0;(#,##0);"-"'
+            ws6.column_dimensions["A"].width = 14
+            ws6.column_dimensions["B"].width = 45
+            for c in range(3, len(anios_disponibles) + 3):
+                ws6.column_dimensions[get_column_letter(c)].width = 16
+            ws6.freeze_panes = "C2"
+            if ws6.max_row > 1:
+                ultima_col = len(anios_disponibles) + 2
+                rango = f"{get_column_letter(ultima_col)}2:{get_column_letter(ultima_col)}{ws6.max_row}"
+                ws6.conditional_formatting.add(rango, ColorScaleRule(
+                    start_type="min", start_color="63BE7B",
+                    mid_type="percentile", mid_value=50, mid_color="FFEB84",
+                    end_type="max", end_color="F8696B"))
+
+            ws7 = wb_completo.create_sheet("Evolucion_Familia_Servicio")
+            ws7.append(["Familia de Servicio"] + [str(a) for a in anios_disponibles])
+            for c in range(1, len(anios_disponibles) + 2):
+                cell = ws7.cell(row=1, column=c)
+                cell.font = header_font; cell.fill = header_fill; cell.border = border
+                cell.alignment = Alignment(horizontal="center")
+            for fs in sorted(evol_famserv.keys()):
+                ws7.append([famserv_map[fs]] + [round(evol_famserv[fs].get(a, 0), 2) for a in anios_disponibles])
+            for r in range(2, ws7.max_row + 1):
+                for c in range(1, len(anios_disponibles) + 2):
+                    cell = ws7.cell(row=r, column=c)
+                    cell.font = data_font; cell.border = border
+                    if c > 1:
+                        cell.number_format = '#,##0;(#,##0);"-"'
+            ws7.column_dimensions["A"].width = 42
+            for c in range(2, len(anios_disponibles) + 2):
+                ws7.column_dimensions[get_column_letter(c)].width = 16
+            if ws7.max_row > 1 and len(anios_disponibles) > 1:
+                chart2 = BarChart()
+                chart2.type = "col"; chart2.grouping = "clustered"
+                chart2.title = "Evolución del Gasto por Familia de Servicio"
+                chart2.y_axis.title = "Gasto Anual ($)"
+                chart2.x_axis.title = "Año"
+                data2 = Reference(ws7, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws7.max_row)
+                cats2 = Reference(ws7, min_col=1, min_row=2, max_row=ws7.max_row)
+                chart2.add_data(data2, titles_from_data=True)
+                chart2.set_categories(cats2)
+                chart2.width = 24; chart2.height = 11
+                ws7.add_chart(chart2, f"A{ws7.max_row + 3}")
+
+            ws8 = wb_completo.create_sheet("Anomalias_Detectadas")
+            ws8.append(["Dimensión", "Grupo", "Año con Anomalía", "Valor Año Anterior", "Valor Año Actual", "% Variación", "Motivo"])
+            for c in range(1, 8):
+                cell = ws8.cell(row=1, column=c)
+                cell.font = header_font; cell.fill = header_fill; cell.border = border
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws8.row_dimensions[1].height = 30
+            if todas_anomalias:
+                for a_row in todas_anomalias:
+                    ws8.append([a_row["Dimensión"], a_row["Grupo"], a_row["Año"], a_row["Valor Año Anterior"],
+                                a_row["Valor Año Actual"], a_row["% Variación"], a_row["Motivo"]])
+            else:
+                ws8.append(["(Sin anomalías detectadas con los criterios actuales)", "", "", "", "", "", ""])
+            for r in range(2, ws8.max_row + 1):
+                for c in range(1, 8):
+                    cell = ws8.cell(row=r, column=c)
+                    cell.font = data_font; cell.border = border
+                    if c in (4, 5):
+                        cell.number_format = '#,##0;(#,##0);"-"'
+                    if c == 6 and isinstance(ws8.cell(row=r, column=6).value, float):
+                        cell.number_format = "+0.00%;-0.00%"
+                        val = ws8.cell(row=r, column=6).value
+                        cell.fill = PatternFill("solid", start_color="FFC7CE" if val > 0 else "C6EFCE",
+                                                 end_color="FFC7CE" if val > 0 else "C6EFCE")
+            ws8.column_dimensions["A"].width = 16
+            ws8.column_dimensions["B"].width = 42
+            ws8.column_dimensions["C"].width = 14
+            ws8.column_dimensions["D"].width = 18
+            ws8.column_dimensions["E"].width = 18
+            ws8.column_dimensions["F"].width = 12
+            ws8.column_dimensions["G"].width = 55
+            ws8.freeze_panes = "A2"
+
+            out_completo = io.BytesIO()
+            wb_completo.save(out_completo)
+            out_completo.seek(0)
+            st.session_state['excel_completo_bytes'] = out_completo.getvalue()
+            st.success("Excel listo. Usa el botón de descarga que apareció abajo.")
+
+        if 'excel_completo_bytes' in st.session_state:
+            st.download_button(
+                "Descargar REP_2 + Panel de Visualización.xlsx",
+                data=st.session_state['excel_completo_bytes'],
+                file_name="REP_2_con_evolucion.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
