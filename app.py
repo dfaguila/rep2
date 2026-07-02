@@ -360,6 +360,50 @@ def _encontrar_columna(header_row, grupos_palabras_clave, evitar=None):
     return None
 
 
+def _a_numero(valor):
+    """Convierte celdas numéricas 'sucias' (texto, '-', separadores de miles
+    en formato chileno o estadounidense, vacías) a float de forma segura.
+    Las tablas ST son cargadas por el usuario y pueden traer celdas con
+    formato de texto en vez de número (ej. '-' como marcador de cero,
+    '1.234.567' con puntos de miles, o '1.234,56' con coma decimal)."""
+    if valor is None:
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        v = valor.strip()
+        if v in ("", "-", "—", "–", "N/A", "n/a", "s/i", "S/I"):
+            return 0.0
+        v = v.replace("$", "").replace(" ", "")
+        n_puntos = v.count(".")
+        n_comas = v.count(",")
+        if n_puntos >= 1 and n_comas >= 1:
+            if v.rfind(",") > v.rfind("."):
+                v = v.replace(".", "").replace(",", ".")  # chileno: 1.234.567,89
+            else:
+                v = v.replace(",", "")  # estadounidense: 1,234,567.89
+        elif n_comas >= 1:
+            if n_comas >= 2:
+                v = v.replace(",", "")
+            else:
+                entero, dec = v.split(",")
+                if entero.lstrip("-").isdigit() and len(dec) <= 2:
+                    v = entero + "." + dec  # coma decimal (ej. "1234,5")
+                else:
+                    v = entero + dec
+        elif n_puntos >= 2:
+            v = v.replace(".", "")  # miles chilenos "1.234.567"
+        elif n_puntos == 1:
+            entero, dec = v.split(".")
+            if entero.lstrip("-").isdigit() and len(dec) == 3 and len(entero.lstrip("-")) <= 3:
+                v = entero + dec  # miles "1.234" (no decimal, montos en pesos)
+        try:
+            return float(v)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def leer_tabla_st(file_bytes):
     """Lee una tabla ST_x detectando columnas por nombre de encabezado.
     Devuelve lista de (cod_recurso, monto_activado, total_gasto_no_activado).
@@ -393,7 +437,9 @@ def leer_tabla_st(file_bytes):
         cod_recurso = row[idx_recurso]
         if cod_recurso is None:
             continue
-        filas.append((cod_recurso, row[idx_activado] or 0, row[idx_gasto] or 0))
+        cod_recurso = _a_numero(cod_recurso)
+        cod_recurso = int(cod_recurso) if cod_recurso == int(cod_recurso) else cod_recurso
+        filas.append((cod_recurso, _a_numero(row[idx_activado]), _a_numero(row[idx_gasto])))
     return filas
 
 
@@ -422,8 +468,8 @@ def procesar_familia_plana(agg, EMPRESA, PERIODO, ANIO, SECTOR, tablas_specs, pa
     for filas, idx_r, idx_a, idx_g in tablas_specs:
         for r in filas:
             cod_recurso = r[idx_r]
-            monto_act = r[idx_a]
-            total_gasto = r[idx_g]
+            monto_act = _a_numero(r[idx_a])
+            total_gasto = _a_numero(r[idx_g])
             by_recurso[cod_recurso][0] += total_gasto
             by_recurso[cod_recurso][1] += monto_act
 
