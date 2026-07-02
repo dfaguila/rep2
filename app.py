@@ -251,10 +251,10 @@ FAMILIA_PREFIJOS = {
     23: 'GGI',
     24: 'GGM',
     25: 'OGG',
-    31: 'GSC',
+    31: 'ST',
     41: 'MEI',
-    51: 'SOP',
-    61: 'STM', 62: 'STM', 63: 'STM', 64: 'STM', 65: 'STM', 66: 'STM',
+    51: 'ST',
+    61: 'GPA', 62: 'GPA', 63: 'GPA', 64: 'GPA', 65: 'GPA', 66: 'GPA',
     71: 'STI', 72: 'STI', 73: 'STI', 74: 'STI', 75: 'STI',
 }
 FAMILIA_NOMBRE = {
@@ -264,10 +264,9 @@ FAMILIA_NOMBRE = {
     'GGI': 'GGI - Bienes Inmuebles',
     'GGM': 'GGM - Bienes Muebles',
     'OGG': 'OGG - Otros Gastos Generales',
-    'GSC': 'GSC - Servicios Comerciales y Legales',
+    'ST': 'ST - Servicios Tercerizados',
     'MEI': 'MEI - Materiales e Insumos',
-    'SOP': 'SOP - Servicios Operacionales',
-    'STM': 'STM - Servicios de Terceros (Prestaciones Menores)',
+    'GPA': 'GPA - Gasto Prestaciones Asociadas',
     'STI': 'STI - Servicios de Terceros (Estudios e Inversión)',
 }
 
@@ -306,6 +305,19 @@ ST_TABLE_TO_CODES = {
 }
 ST_TABLES = list(ST_TABLE_TO_CODES.keys())
 RECURSOS_ST = sorted({c for codes in ST_TABLE_TO_CODES.values() for c in codes})
+
+# ============================================================================
+# Familia GPA - Gasto Prestaciones Asociadas
+# ============================================================================
+# 6 tablas (GPA_1 a GPA_6). Cada una trae su propio "CÓDIGO RECURSO" fijo
+# (6101, 6201, 6301, 6401, 6501, 6601) y, a diferencia de GGM/OGG/MEI/ST, el
+# 100% de su gasto se asigna SIEMPRE a un servicio regulado específico por
+# tabla (no 1101, y sin necesidad de parametrizar servicios no regulados).
+GPA_TABLE_TO_SERVICIO = {
+    "GPA_1": 1201, "GPA_2": 1202, "GPA_3": 1203,
+    "GPA_4": 1204, "GPA_5": 1205, "GPA_6": 1201,
+}
+GPA_TABLES = list(GPA_TABLE_TO_SERVICIO.keys())
 
 
 def _normalizar_encabezado(texto):
@@ -443,14 +455,23 @@ def leer_tabla_st(file_bytes):
     return filas
 
 
-def identificar_tabla_st(nombre_archivo):
-    """Extrae 'ST_<n>' del nombre de archivo subido, sin importar mayúsculas,
-    extensión, o sufijos. Devuelve None si no matchea ningún ST_x conocido."""
+def identificar_tabla(nombre_archivo, tablas_conocidas):
+    """Extrae el nombre de tabla (ej. 'ST_12', 'GPA_3') de un archivo subido,
+    sin importar mayúsculas, extensión o sufijos. Devuelve None si no
+    matchea ninguna tabla conocida de la lista dada."""
     base = nombre_archivo.upper().replace(".XLSX", "").replace(".XLS", "")
-    for tabla in ST_TABLES:
+    for tabla in tablas_conocidas:
         if base == tabla or base.startswith(tabla + "_") or base.startswith(tabla + "-"):
             return tabla
     return None
+
+
+def identificar_tabla_st(nombre_archivo):
+    return identificar_tabla(nombre_archivo, ST_TABLES)
+
+
+def identificar_tabla_gpa(nombre_archivo):
+    return identificar_tabla(nombre_archivo, GPA_TABLES)
 
 
 def read_rows(file_bytes):
@@ -504,7 +525,7 @@ def safe_read_rows(file_bytes, etiqueta, avisos):
     return filas
 
 
-def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
+def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_files):
     avisos = []
 
     grh8 = safe_read_rows(fb.get("grh8"), "GRH_8", avisos)
@@ -647,6 +668,35 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
                 st_by_recurso[cod_recurso][0] += total_gasto * pct
                 st_by_recurso[cod_recurso][1] += monto_act * pct
 
+    # --- GPA: Gasto Prestaciones Asociadas (6 tablas, 100% a servicio fijo por tabla) ---
+    gpa_by_recurso = defaultdict(lambda: [0.0, 0.0])
+    gpa_detalle = []  # (tabla, cod_recurso, servicio_asignado, gasto, activado) para reporte
+    tablas_gpa_faltantes = [t for t in GPA_TABLES if t not in gpa_files]
+    if tablas_gpa_faltantes:
+        avisos.append(
+            f"⚠️ Faltan {len(tablas_gpa_faltantes)} tabla(s) GPA: {', '.join(tablas_gpa_faltantes)} "
+            "— se excluyen del cálculo (sus códigos de recurso quedan en 0)."
+        )
+    for nombre_tabla, filas_gpa in gpa_files.items():
+        if len(filas_gpa) == 0:
+            avisos.append(f"ℹ️ La tabla **{nombre_tabla}** está vacía (sin filas de datos).")
+            continue
+        servicio_fijo = GPA_TABLE_TO_SERVICIO[nombre_tabla]
+        fam = familia(servicio_fijo)
+        tabla_g, tabla_a = 0.0, 0.0
+        recursos_en_tabla = set()
+        for cod_recurso, monto_act, total_gasto in filas_gpa:
+            k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
+            agg[k][0] += total_gasto
+            agg[k][1] += monto_act
+            gpa_by_recurso[cod_recurso][0] += total_gasto
+            gpa_by_recurso[cod_recurso][1] += monto_act
+            tabla_g += total_gasto
+            tabla_a += monto_act
+            recursos_en_tabla.add(cod_recurso)
+        recurso_label = ", ".join(str(c) for c in sorted(recursos_en_tabla))
+        gpa_detalle.append((nombre_tabla, recurso_label, servicio_fijo, tabla_g, tabla_a))
+
     # --- Normalizar % por recurso ---
     tot_no_act = defaultdict(float)
     tot_act = defaultdict(float)
@@ -676,6 +726,7 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
     recursos_ogg = set(ogg_by_recurso.keys())
     recursos_mei = set(mei_by_recurso.keys())
     recursos_st = set(st_by_recurso.keys())
+    recursos_gpa = set(gpa_by_recurso.keys())
 
     def validar(recursos, sum_gasto_fuente, sum_act_fuente):
         sum_gasto_rep2 = sum(r[7] for r in final_rows if r[4] in recursos)
@@ -702,6 +753,8 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
         checks["MEI"] = validar(recursos_mei, sum(v[0] for v in mei_by_recurso.values()), sum(v[1] for v in mei_by_recurso.values()))
     if st_by_recurso:
         checks["ST"] = validar(recursos_st, sum(v[0] for v in st_by_recurso.values()), sum(v[1] for v in st_by_recurso.values()))
+    if gpa_by_recurso:
+        checks["GPA"] = validar(recursos_gpa, sum(v[0] for v in gpa_by_recurso.values()), sum(v[1] for v in gpa_by_recurso.values()))
 
     familia_map = {}
     for c in recursos_grh: familia_map[c] = "GRH - Gastos Recursos Humanos"
@@ -712,12 +765,13 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
     for c in recursos_ogg: familia_map[c] = "OGG - Otros Gastos Generales"
     for c in recursos_mei: familia_map[c] = "MEI - Materiales e Insumos"
     for c in recursos_st: familia_map[c] = "ST - Servicios Tercerizados"
+    for c in recursos_gpa: familia_map[c] = "GPA - Gasto Prestaciones Asociadas"
 
     by_recurso_planas = {"GGM": ggm_by_recurso, "OGG": ogg_by_recurso, "MEI": mei_by_recurso, "ST": st_by_recurso}
-    return final_rows, checks, familia_map, by_recurso_planas, avisos
+    return final_rows, checks, familia_map, by_recurso_planas, gpa_detalle, avisos
 
 
-def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, avisos=None, template_bytes=None):
+def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, gpa_detalle=None, avisos=None, template_bytes=None):
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -779,6 +833,7 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, a
         "GGV - Gastos Generales Vehículos y Equipos", "GGI - Gastos Generales Bienes Inmuebles",
         "GGM - Gastos Generales Bienes Muebles", "OGG - Otros Gastos Generales",
         "MEI - Materiales e Insumos", "ST - Servicios Tercerizados",
+        "GPA - Gasto Prestaciones Asociadas",
     ]
     for fg in orden_familias:
         if fg in resumen:
@@ -836,6 +891,32 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, a
     ws3.column_dimensions["D"].width = 42
     ws3.column_dimensions["E"].width = 55
     ws3.column_dimensions["F"].width = 12
+
+    # Asignación GPA (fija, sin parametrización de servicios no regulados)
+    if gpa_detalle:
+        ws3b = wb.create_sheet("Asignacion_GPA")
+        ws3b.append(["Tabla", "CÓDIGO(S) RECURSO", "SERVICIO REGULADO ASIGNADO (100%)", "GASTO ANUAL", "MONTO ACTIVADO"])
+        for c in range(1, 6):
+            cell = ws3b.cell(row=1, column=c)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws3b.row_dimensions[1].height = 30
+        for tabla, cod_recurso, servicio, g, a in sorted(gpa_detalle):
+            ws3b.append([tabla, cod_recurso, servicio, round(g, 2), round(a, 2)])
+        for r in range(2, ws3b.max_row + 1):
+            for c in range(1, 6):
+                cell = ws3b.cell(row=r, column=c)
+                cell.font = data_font
+                cell.border = border
+                if c in (4, 5):
+                    cell.number_format = '#,##0;(#,##0);"-"'
+        ws3b.column_dimensions["A"].width = 12
+        ws3b.column_dimensions["B"].width = 16
+        ws3b.column_dimensions["C"].width = 32
+        ws3b.column_dimensions["D"].width = 18
+        ws3b.column_dimensions["E"].width = 18
 
     # Catálogo
     ws4 = wb.create_sheet("Catalogo_Servicios_No_Regulados")
@@ -972,13 +1053,18 @@ with st.sidebar:
     f_st_files = st.file_uploader(
         "Tablas ST (selección múltiple)", type="xlsx", key="st_files", accept_multiple_files=True
     )
+    st.markdown("**GPA — Gasto Prestaciones Asociadas**")
+    st.caption("100% del gasto va al servicio regulado fijo de cada tabla (no requiere parametrización).")
+    f_gpa_files = st.file_uploader(
+        "Tablas GPA (selección múltiple, GPA_1 a GPA_6)", type="xlsx", key="gpa_files", accept_multiple_files=True
+    )
     st.markdown("**Plantilla (opcional)**")
     f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
 
     archivos_regulares = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
                            f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
                            f_mei1, f_mei2, f_mei3, f_mei4]
-    hay_algo_cargado = any(archivos_regulares) or bool(f_st_files)
+    hay_algo_cargado = any(archivos_regulares) or bool(f_st_files) or bool(f_gpa_files)
 
 st.markdown(
     """
@@ -988,6 +1074,9 @@ st.markdown(
 - **GGM / OGG / MEI / ST**: sin apertura por servicio — por defecto 100% va al
   servicio regulado 1101; se puede parametrizar % a servicios no regulados
   en los paneles de abajo.
+- **GPA**: 6 tablas, cada una con un servicio regulado FIJO (GPA_1→1201,
+  GPA_2→1202, GPA_3→1203, GPA_4→1204, GPA_5→1205, GPA_6→1201). No requiere
+  parametrización de servicios no regulados.
 - **Generación parcial**: puedes generar REP_2 con solo algunas tablas
   cargadas. Las familias/recursos sin datos quedan en 0, y se muestra un
   aviso detallado de qué faltó o llegó vacío.
@@ -1066,9 +1155,20 @@ if run:
         except Exception as e:
             avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
 
+    gpa_files = {}
+    for f in (f_gpa_files or []):
+        tabla = identificar_tabla_gpa(f.name)
+        if tabla is None:
+            avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla GPA_1..GPA_6 conocida; se ignora.")
+            continue
+        try:
+            gpa_files[tabla] = leer_tabla_st(f.getvalue())  # misma lectura robusta por encabezado
+        except Exception as e:
+            avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
+
     try:
-        final_rows, checks, familia_map, by_recurso_planas, avisos = build_rep2(
-            fb, ggm_params, ogg_params, mei_params, st_files, st_params
+        final_rows, checks, familia_map, by_recurso_planas, gpa_detalle, avisos = build_rep2(
+            fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_files
         )
         avisos = avisos_carga_archivos + avisos
     except Exception as e:
@@ -1120,6 +1220,7 @@ if run:
     params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
     excel_bytes = build_excel(
         final_rows, familia_map, by_recurso_planas, params_by_familia,
+        gpa_detalle=gpa_detalle,
         avisos=avisos,
         template_bytes=f_template.getvalue() if f_template else None,
     )
@@ -1127,6 +1228,7 @@ if run:
         "Descargar REP_2.xlsx",
         data=excel_bytes,
         file_name="REP_2.xlsx",
+
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
