@@ -1,17 +1,18 @@
 """
 App Streamlit - Generador REP_2 (Costos y Gastos por Familia de Servicios)
 
-Consolida 5 familias de gasto:
-  - GRH: Gastos de Recursos Humanos            (GRH_8 + GRH_11)
-  - GCP: Gastos Generales de Personal          (GCP_4 + GCP_5, ya abierta por recurso)
-  - GGV: Gastos Generales Vehículos y Equipos  (GGV_4 + GGV_5)
-  - GGI: Gastos Generales Bienes Inmuebles     (GGI_5, ya abierta por recurso)
-  - GGM: Gastos Generales Bienes Muebles       (GGM_1..GGM_5, sin apertura;
-          por defecto 100% -> servicio 1101, con parametrización opcional
-          para destinar % a servicios no regulados)
+Consolida 7 familias de gasto:
+  - GRH: Recursos Humanos                (GRH_8 + GRH_11)
+  - GCP: Gastos Generales de Personal    (GCP_4 + GCP_5, ya abierta por recurso)
+  - GGV: Vehículos y Equipos             (GGV_4 + GGV_5)
+  - GGI: Bienes Inmuebles                (GGI_5, ya abierta por recurso y servicio)
+  - GGM: Bienes Muebles                  (GGM_1..GGM_5, sin apertura, recursos 2401-2411)
+  - OGG: Otros Gastos Generales          (OGG_5, sin apertura, recursos 2501-2550)
+  - MEI: Materiales e Insumos            (MEI_1..MEI_4, sin apertura, recursos 4101-4106)
 
-Sube los archivos correspondientes y la app arma la tabla REP_2 consolidada,
-lista para descargar, con validaciones de cuadratura por cada familia.
+GGM, OGG y MEI no traen columna de servicio: por defecto 100% se asigna al
+servicio regulado 1101, con parametrización opcional para destinar % a
+servicios no regulados.
 """
 
 import io
@@ -67,33 +68,61 @@ SERVICIOS_NO_REGULADOS = {
     2214: "OTROS SERVICIOS NO REGULADOS",
 }
 
-RECURSOS_GGM = [2401, 2402, 2403, 2404, 2405, 2406, 2407, 2408, 2409, 2410, 2411]
+# Recursos parametrizables por familia plana (para el selector de la UI)
+RECURSOS_GGM = list(range(2401, 2412))
+RECURSOS_OGG = list(range(2501, 2551))
+RECURSOS_MEI = [4101, 4102, 4103, 4104, 4105, 4106]
 
 
 def read_rows(file_bytes):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     ws = wb.active
-    return [r for r in ws.iter_rows(min_row=2, values_only=True) if r[4] is not None]
+    return [r for r in ws.iter_rows(min_row=2, values_only=True) if r[0] is not None]
 
 
 def familia(cod_servicio):
     return cod_servicio // 100
 
 
-def build_rep2(files_bytes, ggm_params):
-    """
-    files_bytes: dict con claves grh8, grh11, gcp4, gcp5, ggv4, ggv5, ggi5,
-                 ggm1..ggm5 -> bytes del archivo
-    ggm_params: dict {cod_recurso: [(cod_servicio_no_regulado, pct), ...]}
-    """
-    grh8 = read_rows(files_bytes["grh8"])
-    grh11 = read_rows(files_bytes["grh11"])
-    gcp4 = read_rows(files_bytes["gcp4"])
-    gcp5 = read_rows(files_bytes["gcp5"])
-    ggv4 = read_rows(files_bytes["ggv4"])
-    ggv5 = read_rows(files_bytes["ggv5"])
-    ggi5 = read_rows(files_bytes["ggi5"])
-    ggm_tablas = [read_rows(files_bytes[f"ggm{i}"]) for i in range(1, 6)]
+def procesar_familia_plana(agg, EMPRESA, PERIODO, ANIO, SECTOR, tablas_specs, params):
+    by_recurso = defaultdict(lambda: [0.0, 0.0])
+    for filas, idx_r, idx_a, idx_g in tablas_specs:
+        for r in filas:
+            cod_recurso = r[idx_r]
+            monto_act = r[idx_a]
+            total_gasto = r[idx_g]
+            by_recurso[cod_recurso][0] += total_gasto
+            by_recurso[cod_recurso][1] += monto_act
+
+    for cod_recurso, (gasto_no_act, monto_act) in by_recurso.items():
+        overrides = params.get(cod_recurso, [])
+        pct_reg = 1.0 - sum(p for _, p in overrides)
+        fam = familia(1101)
+        k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
+        agg[k][0] += gasto_no_act * pct_reg
+        agg[k][1] += monto_act * pct_reg
+        for cod_serv_noreg, pct in overrides:
+            fam2 = familia(cod_serv_noreg)
+            k2 = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam2)
+            agg[k2][0] += gasto_no_act * pct
+            agg[k2][1] += monto_act * pct
+    return by_recurso
+
+
+def build_rep2(fb, ggm_params, ogg_params, mei_params):
+    grh8 = read_rows(fb["grh8"])
+    grh11 = read_rows(fb["grh11"])
+    gcp4 = read_rows(fb["gcp4"])
+    gcp5 = read_rows(fb["gcp5"])
+    ggv4 = read_rows(fb["ggv4"])
+    ggv5 = read_rows(fb["ggv5"])
+    ggi5 = read_rows(fb["ggi5"])
+    ggm_tablas = [read_rows(fb[f"ggm{i}"]) for i in range(1, 6)]
+    ogg5 = read_rows(fb["ogg5"])
+    mei1 = read_rows(fb["mei1"])
+    mei2 = read_rows(fb["mei2"])
+    mei3 = read_rows(fb["mei3"])
+    mei4 = read_rows(fb["mei4"])
 
     agg = defaultdict(lambda: [0.0, 0.0])
     EMPRESA, PERIODO, ANIO, SECTOR = grh8[0][0], grh8[0][1], grh8[0][2], grh8[0][3]
@@ -160,27 +189,25 @@ def build_rep2(files_bytes, ggm_params):
         agg[k][0] += gasto_no_act
 
     # --- GGM ---
-    ggm_by_recurso = defaultdict(lambda: [0.0, 0.0])
-    for tabla in ggm_tablas:
-        for r in tabla:
-            cod_recurso = r[4]
-            monto_act = r[-3]
-            total_gasto = r[-1]
-            ggm_by_recurso[cod_recurso][0] += total_gasto
-            ggm_by_recurso[cod_recurso][1] += monto_act
+    ggm_by_recurso = procesar_familia_plana(
+        agg, EMPRESA, PERIODO, ANIO, SECTOR,
+        [(t, 4, -3, -1) for t in ggm_tablas],
+        ggm_params
+    )
 
-    for cod_recurso, (gasto_no_act, monto_act) in ggm_by_recurso.items():
-        overrides = ggm_params.get(cod_recurso, [])
-        pct_reg = 1.0 - sum(p for _, p in overrides)
-        fam = familia(1101)
-        k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
-        agg[k][0] += gasto_no_act * pct_reg
-        agg[k][1] += monto_act * pct_reg
-        for cod_serv_noreg, pct in overrides:
-            fam2 = familia(cod_serv_noreg)
-            k2 = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam2)
-            agg[k2][0] += gasto_no_act * pct
-            agg[k2][1] += monto_act * pct
+    # --- OGG ---
+    ogg_by_recurso = procesar_familia_plana(
+        agg, EMPRESA, PERIODO, ANIO, SECTOR,
+        [(ogg5, 4, 9, 11)],
+        ogg_params
+    )
+
+    # --- MEI (índices de columna distintos por tabla; MEI_1 recurso en col6) ---
+    mei_by_recurso = procesar_familia_plana(
+        agg, EMPRESA, PERIODO, ANIO, SECTOR,
+        [(mei1, 6, 20, 22), (mei2, 4, 17, 16), (mei3, 4, 17, 19), (mei4, 4, 14, 16)],
+        mei_params
+    )
 
     # --- Normalizar % por recurso ---
     tot_no_act = defaultdict(float)
@@ -202,20 +229,20 @@ def build_rep2(files_bytes, ggm_params):
             round(pct_act, 4) if a > 0 else 0.0, round(a, 2),
         ])
 
-    # --- Validaciones por familia ---
+    # --- Validaciones ---
     recursos_grh = set(r[6] for r in grh8)
     recursos_gcp = set(r[6] for r in gcp4)
     recursos_ggv = set(r[5] for r in ggv4)
     recursos_ggi = set(r[5] for r in ggi5)
     recursos_ggm = set(ggm_by_recurso.keys())
+    recursos_ogg = set(ogg_by_recurso.keys())
+    recursos_mei = set(mei_by_recurso.keys())
 
     def validar(recursos, sum_gasto_fuente, sum_act_fuente):
         sum_gasto_rep2 = sum(r[7] for r in final_rows if r[4] in recursos)
         sum_act_rep2 = sum(r[9] for r in final_rows if r[4] in recursos)
         return {
-            "gasto_rep2": sum_gasto_rep2, "gasto_fuente": sum_gasto_fuente,
             "diff_gasto": sum_gasto_rep2 - sum_gasto_fuente,
-            "act_rep2": sum_act_rep2, "act_fuente": sum_act_fuente,
             "diff_act": sum_act_rep2 - sum_act_fuente,
         }
 
@@ -225,24 +252,24 @@ def build_rep2(files_bytes, ggm_params):
         "GGV": validar(recursos_ggv, sum(r[9] for r in ggv4), sum(r[7] for r in ggv4)),
         "GGI": validar(recursos_ggi, sum(r[6] for r in ggi5), 0),
         "GGM": validar(recursos_ggm, sum(v[0] for v in ggm_by_recurso.values()), sum(v[1] for v in ggm_by_recurso.values())),
+        "OGG": validar(recursos_ogg, sum(v[0] for v in ogg_by_recurso.values()), sum(v[1] for v in ogg_by_recurso.values())),
+        "MEI": validar(recursos_mei, sum(v[0] for v in mei_by_recurso.values()), sum(v[1] for v in mei_by_recurso.values())),
     }
 
     familia_map = {}
-    for c in recursos_grh:
-        familia_map[c] = "GRH - Gastos Recursos Humanos"
-    for c in recursos_gcp:
-        familia_map[c] = "GCP - Gastos Generales de Personal"
-    for c in recursos_ggv:
-        familia_map[c] = "GGV - Gastos Generales Vehículos y Equipos"
-    for c in recursos_ggi:
-        familia_map[c] = "GGI - Gastos Generales Bienes Inmuebles"
-    for c in recursos_ggm:
-        familia_map[c] = "GGM - Gastos Generales Bienes Muebles"
+    for c in recursos_grh: familia_map[c] = "GRH - Gastos Recursos Humanos"
+    for c in recursos_gcp: familia_map[c] = "GCP - Gastos Generales de Personal"
+    for c in recursos_ggv: familia_map[c] = "GGV - Gastos Generales Vehículos y Equipos"
+    for c in recursos_ggi: familia_map[c] = "GGI - Gastos Generales Bienes Inmuebles"
+    for c in recursos_ggm: familia_map[c] = "GGM - Gastos Generales Bienes Muebles"
+    for c in recursos_ogg: familia_map[c] = "OGG - Otros Gastos Generales"
+    for c in recursos_mei: familia_map[c] = "MEI - Materiales e Insumos"
 
-    return final_rows, checks, familia_map, ggm_by_recurso, recursos_ggm
+    by_recurso_planas = {"GGM": ggm_by_recurso, "OGG": ogg_by_recurso, "MEI": mei_by_recurso}
+    return final_rows, checks, familia_map, by_recurso_planas
 
 
-def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_params, template_bytes=None):
+def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, template_bytes=None):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "REP_2"
@@ -282,7 +309,7 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
 
-    # Resumen por familia de gasto
+    # Resumen por familia
     ws2 = wb.create_sheet("Resumen_por_familia_gasto")
     ws2.append(["Familia de Gasto", "GASTO ANUAL (no activado)", "MONTO ACTIVADO", "TOTAL"])
     for c in range(1, 5):
@@ -301,7 +328,8 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
     orden_familias = [
         "GRH - Gastos Recursos Humanos", "GCP - Gastos Generales de Personal",
         "GGV - Gastos Generales Vehículos y Equipos", "GGI - Gastos Generales Bienes Inmuebles",
-        "GGM - Gastos Generales Bienes Muebles",
+        "GGM - Gastos Generales Bienes Muebles", "OGG - Otros Gastos Generales",
+        "MEI - Materiales e Insumos",
     ]
     for fg in orden_familias:
         if fg in resumen:
@@ -322,10 +350,10 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
     for col in ["B", "C", "D"]:
         ws2.column_dimensions[col].width = 20
 
-    # Parametrización GGM aplicada
-    ws3 = wb.create_sheet("Parametrizacion_GGM")
-    ws3.append(["CÓDIGO RECURSO GGM", "GASTO ANUAL TOTAL (100%)", "CÓDIGO SERVICIO NO REGULADO", "SERVICIO NO REGULADO", "% ASIGNADO"])
-    for c in range(1, 6):
+    # Parametrización unificada GGM+OGG+MEI
+    ws3 = wb.create_sheet("Parametrizacion_familias_planas")
+    ws3.append(["Familia", "CÓDIGO RECURSO", "GASTO ANUAL TOTAL (100%)", "CÓDIGO SERVICIO NO REGULADO", "SERVICIO NO REGULADO", "% ASIGNADO"])
+    for c in range(1, 7):
         cell = ws3.cell(row=1, column=c)
         cell.font = header_font
         cell.fill = header_fill
@@ -333,31 +361,34 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
         cell.border = border
     ws3.row_dimensions[1].height = 30
 
-    for cod_recurso in sorted(recursos_ggm):
-        gasto_total = ggm_by_recurso[cod_recurso][0] + ggm_by_recurso[cod_recurso][1]
-        overrides = ggm_params.get(cod_recurso, [])
-        if not overrides:
-            ws3.append([cod_recurso, round(gasto_total, 2), "(sin parametrizar -> 100% a servicio 1101)", "", ""])
-        else:
-            for cod_serv, pct in overrides:
-                ws3.append([cod_recurso, round(gasto_total, 2), cod_serv, SERVICIOS_NO_REGULADOS.get(cod_serv, ""), pct])
+    for nombre_familia, by_recurso in by_recurso_planas.items():
+        params = params_by_familia.get(nombre_familia, {})
+        for cod_recurso in sorted(by_recurso.keys()):
+            gasto_total = by_recurso[cod_recurso][0] + by_recurso[cod_recurso][1]
+            overrides = params.get(cod_recurso, [])
+            if not overrides:
+                ws3.append([nombre_familia, cod_recurso, round(gasto_total, 2), "(sin parametrizar -> 100% a servicio 1101)", "", ""])
+            else:
+                for cod_serv, pct in overrides:
+                    ws3.append([nombre_familia, cod_recurso, round(gasto_total, 2), cod_serv, SERVICIOS_NO_REGULADOS.get(cod_serv, ""), pct])
 
     for r in range(2, ws3.max_row + 1):
-        for c in range(1, 6):
+        for c in range(1, 7):
             cell = ws3.cell(row=r, column=c)
             cell.font = data_font
             cell.border = border
-            if c == 2:
+            if c == 3:
                 cell.number_format = '#,##0;(#,##0);"-"'
-            if c == 5 and isinstance(ws3.cell(row=r, column=5).value, float):
+            if c == 6 and isinstance(ws3.cell(row=r, column=6).value, float):
                 cell.number_format = "0.00%"
-    ws3.column_dimensions["A"].width = 18
-    ws3.column_dimensions["B"].width = 22
-    ws3.column_dimensions["C"].width = 42
-    ws3.column_dimensions["D"].width = 55
-    ws3.column_dimensions["E"].width = 14
+    ws3.column_dimensions["A"].width = 10
+    ws3.column_dimensions["B"].width = 16
+    ws3.column_dimensions["C"].width = 22
+    ws3.column_dimensions["D"].width = 42
+    ws3.column_dimensions["E"].width = 55
+    ws3.column_dimensions["F"].width = 12
 
-    # Catálogo de servicios no regulados
+    # Catálogo
     ws4 = wb.create_sheet("Catalogo_Servicios_No_Regulados")
     ws4.append(["CÓDIGO SERVICIO NO REGULADO", "SERVICIO NO REGULADO"])
     for c in range(1, 3):
@@ -375,7 +406,7 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
     ws4.column_dimensions["A"].width = 22
     ws4.column_dimensions["B"].width = 70
 
-    # Diccionario SISS (si se subió plantilla)
+    # Diccionario SISS
     if template_bytes is not None:
         try:
             tmpl = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=True)
@@ -394,10 +425,52 @@ def build_excel(final_rows, familia_map, ggm_by_recurso, recursos_ggm, ggm_param
     return out
 
 
+def panel_parametrizacion(nombre, recursos_disponibles, session_key):
+    """Renderiza un panel de parametrización reutilizable para GGM/OGG/MEI."""
+    if session_key not in st.session_state:
+        st.session_state[session_key] = []
+
+    st.markdown(f"**{nombre}**")
+    col1, col2, col3, col4 = st.columns([1.2, 2.5, 1, 0.8])
+    with col1:
+        sel_recurso = st.selectbox("Código Recurso", recursos_disponibles, key=f"sel_recurso_{session_key}")
+    with col2:
+        sel_servicio = st.selectbox(
+            "Servicio no regulado destino",
+            options=list(SERVICIOS_NO_REGULADOS.keys()),
+            format_func=lambda c: f"{c} - {SERVICIOS_NO_REGULADOS[c]}",
+            key=f"sel_servicio_{session_key}",
+        )
+    with col3:
+        sel_pct = st.number_input("% asignado", min_value=0.0, max_value=100.0, value=10.0, step=1.0, key=f"sel_pct_{session_key}")
+    with col4:
+        st.write("")
+        st.write("")
+        if st.button("Agregar", key=f"add_{session_key}"):
+            st.session_state[session_key].append((sel_recurso, sel_servicio, sel_pct / 100.0))
+
+    if st.session_state[session_key]:
+        for i, (cod_r, cod_s, pct) in enumerate(st.session_state[session_key]):
+            c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
+            c1.write(cod_r)
+            c2.write(f"{cod_s} - {SERVICIOS_NO_REGULADOS.get(cod_s, '')}")
+            c3.write(f"{pct:.1%}")
+            if c4.button("Quitar", key=f"del_{session_key}_{i}"):
+                st.session_state[session_key].pop(i)
+                st.rerun()
+    else:
+        st.caption(f"Sin parametrización: 100% de todos los recursos {nombre} va al servicio 1101.")
+
+    params = defaultdict(list)
+    for cod_r, cod_s, pct in st.session_state[session_key]:
+        params[cod_r].append((cod_s, pct))
+    return dict(params)
+
+
 # ---------------------------------------------------------------- UI --------
 st.title("Generador REP_2 · Costos y Gastos por Familia de Servicios")
 st.caption(
-    "Consolida las familias de gasto GRH, GCP, GGV, GGI y GGM en la tabla "
+    "Consolida las familias GRH, GCP, GGV, GGI, GGM, OGG y MEI en la tabla "
     "REP_2 exigida por la SISS."
 )
 
@@ -420,113 +493,97 @@ with st.sidebar:
     f_ggm3 = st.file_uploader("GGM_3.xlsx", type="xlsx", key="ggm3")
     f_ggm4 = st.file_uploader("GGM_4.xlsx", type="xlsx", key="ggm4")
     f_ggm5 = st.file_uploader("GGM_5.xlsx", type="xlsx", key="ggm5")
+    st.markdown("**OGG — Otros Gastos Generales**")
+    f_ogg5 = st.file_uploader("OGG_5.xlsx", type="xlsx", key="ogg5")
+    st.markdown("**MEI — Materiales e Insumos**")
+    f_mei1 = st.file_uploader("MEI_1.xlsx", type="xlsx", key="mei1")
+    f_mei2 = st.file_uploader("MEI_2.xlsx", type="xlsx", key="mei2")
+    f_mei3 = st.file_uploader("MEI_3.xlsx", type="xlsx", key="mei3")
+    f_mei4 = st.file_uploader("MEI_4.xlsx", type="xlsx", key="mei4")
     st.markdown("**Plantilla (opcional)**")
     f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
 
     required = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
-                f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5]
+                f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
+                f_mei1, f_mei2, f_mei3, f_mei4]
     all_ready = all(required)
 
 st.markdown(
     """
 **Lógica aplicada**
-- **GRH**: % de dedicación por persona (GRH_11) aplicado a GRH_8.
-- **GCP**: GCP_5 ya viene abierta por recurso y servicio — gasto no activado
-  directo; el activado usa el mismo % aplicado a GCP_4.
-- **GGV**: % de dedicación por activo (GGV_5) aplicado a GGV_4.
-- **GGI**: GGI_5 ya viene abierta por recurso y servicio, igual que GCP_5.
-- **GGM**: 5 tablas planas (GGM_1 a GGM_5, recursos 2401-2411) sin apertura
-  por servicio. Por defecto, 100% va al servicio regulado 1101. Puedes
-  parametrizar abajo qué % de cada recurso GGM se destina a un servicio no
-  regulado; el remanente sigue yendo a 1101.
+- **GRH / GGV**: % de dedicación (por persona o por activo) aplicado a los montos de gasto.
+- **GCP / GGI**: ya vienen abiertas por recurso y servicio.
+- **GGM / OGG / MEI**: sin apertura por servicio — por defecto 100% va al
+  servicio regulado 1101; se puede parametrizar % a servicios no regulados
+  en los paneles de abajo.
     """
 )
 
-st.subheader("Parametrización opcional — GGM")
-st.caption(
-    "Por defecto todo el gasto GGM se asigna 100% al servicio regulado 1101. "
-    "Si quieres destinar un % de algún recurso GGM (2401 a 2411) a un servicio "
-    "no regulado, agrégalo aquí. El resto del recurso sigue yendo a 1101."
-)
+st.subheader("Parametrización opcional — familias sin apertura por servicio")
+st.caption("Por defecto todo el gasto se asigna 100% al servicio regulado 1101.")
+
+with st.expander("Configurar parametrización GGM / OGG / MEI", expanded=False):
+    ggm_params = panel_parametrizacion("GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_overrides")
+    st.divider()
+    ogg_params = panel_parametrizacion("OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_overrides")
+    st.divider()
+    mei_params = panel_parametrizacion("MEI (recursos 4101-4106)", RECURSOS_MEI, "mei_overrides")
 
 if "ggm_overrides" not in st.session_state:
-    st.session_state.ggm_overrides = []
+    ggm_params = {}
+if "ogg_overrides" not in st.session_state:
+    ogg_params = {}
+if "mei_overrides" not in st.session_state:
+    mei_params = {}
 
-with st.expander("Configurar parametrización GGM", expanded=False):
-    col1, col2, col3, col4 = st.columns([1.2, 2.5, 1, 0.8])
-    with col1:
-        sel_recurso = st.selectbox("Código Recurso GGM", RECURSOS_GGM, key="sel_recurso_ggm")
-    with col2:
-        sel_servicio = st.selectbox(
-            "Servicio no regulado destino",
-            options=list(SERVICIOS_NO_REGULADOS.keys()),
-            format_func=lambda c: f"{c} - {SERVICIOS_NO_REGULADOS[c]}",
-            key="sel_servicio_ggm",
-        )
-    with col3:
-        sel_pct = st.number_input("% asignado", min_value=0.0, max_value=100.0, value=10.0, step=1.0, key="sel_pct_ggm")
-    with col4:
-        st.write("")
-        st.write("")
-        if st.button("Agregar"):
-            st.session_state.ggm_overrides.append((sel_recurso, sel_servicio, sel_pct / 100.0))
+# Validar overflow > 100%
+def check_overflow(params):
+    return {r: sum(p for _, p in lst) for r, lst in params.items() if sum(p for _, p in lst) > 1.0}
 
-    if st.session_state.ggm_overrides:
-        st.markdown("**Parametrización actual:**")
-        for i, (cod_r, cod_s, pct) in enumerate(st.session_state.ggm_overrides):
-            c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
-            c1.write(cod_r)
-            c2.write(f"{cod_s} - {SERVICIOS_NO_REGULADOS.get(cod_s, '')}")
-            c3.write(f"{pct:.1%}")
-            if c4.button("Quitar", key=f"del_{i}"):
-                st.session_state.ggm_overrides.pop(i)
-                st.rerun()
-    else:
-        st.info("Sin parametrización: 100% de todos los recursos GGM va al servicio 1101.")
-
-ggm_params = defaultdict(list)
-for cod_r, cod_s, pct in st.session_state.ggm_overrides:
-    ggm_params[cod_r].append((cod_s, pct))
-
-# Validar que ningún recurso supere 100% en overrides
-overflow = {r: sum(p for _, p in lst) for r, lst in ggm_params.items() if sum(p for _, p in lst) > 1.0}
+overflow = {}
+overflow.update(check_overflow(ggm_params))
+overflow.update(check_overflow(ogg_params))
+overflow.update(check_overflow(mei_params))
 if overflow:
     st.error(f"La suma de % parametrizados supera 100% para el(los) recurso(s): {list(overflow.keys())}. Ajusta los valores.")
 
 run = st.button("Generar REP_2", type="primary", disabled=not all_ready or bool(overflow))
 
 if not all_ready:
-    st.info("Sube los 12 archivos requeridos en el panel izquierdo (GGV_5 y GGI_5 incluidos) para habilitar la generación.")
+    st.info("Sube los 17 archivos requeridos en el panel izquierdo para habilitar la generación.")
 
 if run:
-    files_bytes = {
+    fb = {
         "grh8": f_grh8.getvalue(), "grh11": f_grh11.getvalue(),
         "gcp4": f_gcp4.getvalue(), "gcp5": f_gcp5.getvalue(),
         "ggv4": f_ggv4.getvalue(), "ggv5": f_ggv5.getvalue(),
         "ggi5": f_ggi5.getvalue(),
         "ggm1": f_ggm1.getvalue(), "ggm2": f_ggm2.getvalue(), "ggm3": f_ggm3.getvalue(),
         "ggm4": f_ggm4.getvalue(), "ggm5": f_ggm5.getvalue(),
+        "ogg5": f_ogg5.getvalue(),
+        "mei1": f_mei1.getvalue(), "mei2": f_mei2.getvalue(),
+        "mei3": f_mei3.getvalue(), "mei4": f_mei4.getvalue(),
     }
     try:
-        final_rows, checks, familia_map, ggm_by_recurso, recursos_ggm = build_rep2(files_bytes, dict(ggm_params))
+        final_rows, checks, familia_map, by_recurso_planas = build_rep2(fb, ggm_params, ogg_params, mei_params)
     except Exception as e:
         st.error(f"Error procesando los archivos: {e}")
         st.stop()
 
     df = pd.DataFrame(final_rows, columns=HEADERS)
-    st.success(f"REP_2 generado con {len(df)} filas (5 familias de gasto consolidadas).")
+    st.success(f"REP_2 generado con {len(df)} filas (7 familias de gasto consolidadas).")
 
     st.subheader("Validación de cuadratura por familia de gasto")
-    cols = st.columns(5)
+    cols = st.columns(7)
     all_ok = True
     for col, (fam, chk) in zip(cols, checks.items()):
         with col:
             st.markdown(f"**{fam}**")
-            st.metric("Δ GASTO ANUAL", f"{chk['diff_gasto']:,.2f}")
-            st.metric("Δ MONTO ACTIVADO", f"{chk['diff_act']:,.2f}")
+            st.metric("Δ GASTO", f"{chk['diff_gasto']:,.1f}")
+            st.metric("Δ ACTIVADO", f"{chk['diff_act']:,.1f}")
             if abs(chk["diff_gasto"]) > 1 or abs(chk["diff_act"]) > 1:
                 all_ok = False
-                st.warning("Diferencia > $1")
+                st.warning("Diff > $1")
             else:
                 st.info("OK")
 
@@ -544,8 +601,9 @@ if run:
         use_container_width=True,
     )
 
+    params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params}
     excel_bytes = build_excel(
-        final_rows, familia_map, ggm_by_recurso, recursos_ggm, dict(ggm_params),
+        final_rows, familia_map, by_recurso_planas, params_by_familia,
         f_template.getvalue() if f_template else None
     )
     st.download_button(
