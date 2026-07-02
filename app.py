@@ -16,6 +16,7 @@ servicios no regulados.
 """
 
 import io
+import statistics
 from collections import defaultdict
 
 import openpyxl
@@ -69,6 +70,215 @@ SERVICIOS_NO_REGULADOS = {
 }
 
 # Recursos parametrizables por familia plana (para el selector de la UI)
+
+# ============================================================================
+# Diccionario de códigos de recurso (para el Panel de Visualización)
+# ============================================================================
+RECURSO_NOMBRE = {
+    1101: "Remuneraciones",
+    1102: "Honorarios",
+    1103: "Horas Extras",
+    1201: "Indemnizaciones",
+    1202: "Seguro de Cesantía",
+    1203: "Seguro de Accidentes",
+    1204: "Seguro de Invalidez y Sobrevivencia",
+    1205: "Otros Beneficios Adicionales",
+    2101: "Alimentacíón",
+    2102: "Capacitación",
+    2103: "Pasajes",
+    2104: "Alojamientos",
+    2105: "Viáticos",
+    2106: "Accesorios de personal",
+    2201: "Arriendo de vehículos y maquinarias",
+    2202: "Combustible",
+    2203: "Permisos de circulación",
+    2204: "Revisión técnica",
+    2205: "Seguros",
+    2206: "Mantención Preventiva (no incluye combustible)",
+    2207: "Recobros y Mantención Correctiva",
+    2208: "Peajes",
+    2209: "Tags",
+    2210: "Implementación tag",
+    2211: "Gasto identificación de vehículos",
+    2301: "Arriendo de inmuebles",
+    2302: "Consumos básicos",
+    2303: "Servicio de aseo",
+    2304: "Materiales de aseo",
+    2305: "Mantención de inmuebles",
+    2306: "Mantención de extintores",
+    2307: "Mantención de areas verdes",
+    2308: "Vigilancia presencial",
+    2309: "Vigilancia a distancia",
+    2310: "Contribuciones",
+    2311: "Comisiones de Corretaje de Inmuebles por compra o arriendo",
+    2401: "Arriendo de equipos informáticos",
+    2402: "Servicios informáticos",
+    2403: "Telefonía Fija",
+    2404: "Enlasces de Internet Fijos",
+    2405: "Enlaces de datos entre inmuebles (incluye enlaces satelitales)",
+    2406: "Telefonía y Banda Ancha Móvil",
+    2407: "Tarjetas SIM para aplicaciones M2M",
+    2408: "Radio trunking de voz y datos",
+    2409: "Telefonía Satelital",
+    2410: "Materiales e insumos de oficina, computacionales y bodega",
+    2411: "Materiales e insumos de laboratorio",
+    2501: "Dietas del Directorio",
+    2502: "Gastos de Representación Directorio",
+    2503: "Patentes Comerciales",
+    2504: "Servicios de Imprenta, Fotocopiado y Reproducción",
+    2505: "Trámites y gastos notariales",
+    2506: "Actuaciones Judiciales",
+    2507: "Inscripciones",
+    2508: "Peritajes",
+    2509: "Tasaciones",
+    2510: "Enlaces Satelitales",
+    2511: "Líneas Transmisión de Datos",
+    2512: "Enlaces de Internet",
+    2513: "Impuestos por uso de Canales de Radiofrecuencia",
+    2514: "Fletes",
+    2515: "Transporte de Correspondencia (incluye servicios postales y mensajería)",
+    2516: "Transporte de Muestras de Laboratorio",
+    2517: "Seguros de infraestructura de capacidad",
+    2518: "Seguros de inmuebles",
+    2519: "Seguros de redes",
+    2520: "Autoseguro",
+    2521: "Seguros de Responsabilidad Civil",
+    2522: "Seguros Menores",
+    2523: "Deducibles pagados",
+    2524: "Publicidad y Avisos (Radio, TV, Diarios u otros medios)",
+    2525: "Diseño gráfico",
+    2526: "Rotulaciones gráficas",
+    2527: "Materiales de difusión",
+    2528: "Auspicios y aportes",
+    2529: "Donaciones",
+    2530: "Eventos comunitarios",
+    2531: "Eventos corporativos (juntas de accionistas, cenas fin de año, etc.)",
+    2532: "Campañas de educación",
+    2533: "Materiales de campañas",
+    2534: "Derechos de asociaciones y canalistas",
+    2535: "Derechos de afiliaciones",
+    2536: "Derechos SERVIU o Vialidad",
+    2537: "Permisos municipales",
+    2538: "Canon anual por activos en comodato",
+    2539: "Fondo Fijo Rotativo",
+    2540: "Garantías a favor de SISS",
+    2541: "Gastos financieros asociados a Garantías SERVIU o Vialidad",
+    2542: "Multas",
+    2543: "Indemnizaciones a terceros",
+    2544: "Suscripciones",
+    2545: "Impuestos pagados",
+    2546: "Servicios Bancarios",
+    2547: "Operaciones Financieras",
+    2548: "Castigo incobrables",
+    2549: "Otros Gastos Generales",
+    3101: "Lectura de medidores",
+    3102: "Reparto de boletas y otros documentos",
+    3103: "Suministro e impresión de boletas y otros documentos",
+    3104: "Servicios de recaudación en cajas externas",
+    3105: "Servicios de recaudación en cajas propias",
+    3106: "Servicios de atención telefónica o distante",
+    3107: "Servicios de inspección comercial",
+    3108: "Servicios de cobranza prejudicial",
+    3109: "Servicios de gestión",
+    3110: "Servicios de transporte de personas (buses de acercamiento, radiotaxis, etc.)",
+    3111: "Servicios de almacenamiento y bodegaje",
+    3112: "Servicios de traslados de mercancías",
+    3113: "Servicios de Procesamiento, Archivo y Digitación de Datos",
+    3114: "Auditorías a los Estados Financieros",
+    3115: "Clasificación de Riesgo",
+    3116: "Administración del Registro de Accionistas",
+    3117: "Asesorías Tributarias y Contables",
+    3118: "Gestión de Recursos Hídricos",
+    3119: "Administración del Rol Privado",
+    3120: "Selección de Personal",
+    3121: "Auditorías Sistemas de Calidad",
+    3122: "Asesorías en Servicio al Cliente",
+    3123: "Planes de Desarrollo",
+    3124: "Estudios Tarifarios",
+    3125: "Comisiones de Expertos en Procesos Tarifarios",
+    3126: "Defensa por acciones de responsabilidad civil",
+    3127: "Defensa de derechos sobre inmuebles",
+    3128: "Defensa en juicios laborales",
+    3129: "Reclamaciones tributarias",
+    3130: "Asesoría y defensa en procesos penales",
+    3131: "Laboral Permanente y Negociación Colectiva",
+    3132: "Informes Legales o en Derecho",
+    3133: "Otros Servicios No Operacionales",
+    4101: "Productos químicos",
+    4102: "Energía Eléctrica",
+    4103: "Materiales y repuestos",
+    4104: "Compra de agua cruda",
+    4105: "Compra de agua potable",
+    4106: "Arriendo de derechos de agua",
+    5101: "Servicios de control de calidad de agua potable",
+    5102: "Servicios de control de calidad de agua servidas",
+    5103: "Servicios de interconexión AP",
+    5104: "Servicios de interconexión AS",
+    5105: "Servicios de operación de redes y conexiones",
+    5106: "Servicios de operación de infraestructura",
+    5107: "Servicios de transporte y disposición de lodos",
+    5108: "Servicios de control y monitoreo ambiental",
+    5109: "Servicios de mantención de infraestructura",
+    5110: "Servicios de mantención de redes y conexiones",
+    5111: "Servicios de mantención de recintos",
+    5112: "Servicios de mantención de servidumbres",
+    5113: "Concesiones marítimas",
+    5114: "Otros Servicios Operacionales",
+    6101: "Servicios de Terceros asociados a Control Directo de Riles",
+    6201: "Servicios de Terceros asociados a Mantención de Grifos",
+    6301: "Servicios de Terceros asociados a Corte y Reposición",
+    6401: "Servicios de Terceros asociados a Revisión de Proyectos de Construcción",
+    6501: "Servicios de Terceros asociados a Verificación de Medidores",
+    6601: "Servicios de Terceros asociados a Otras Prestaciones Asociadas",
+    7101: "Servicios de Terceros asociados a Estudios preliminares,  Hidrológicos e Hidrogeológicos",
+    7102: "Servicios de Terceros asociados a Diseños de obras",
+    7103: "Servicios de Terceros asociados a Impacto Ambiental",
+    7201: "Servicios de Terceros asociados a Construcción de Obras (Obras Civiles, Eléctricas, de Control, Montaje de Equipos, Mitigación Ambiental, Compensación Ambiental, etc.)",
+    7301: "Servicios de Terceros asociados a Inspección Técnica de Obras",
+    7401: "Servicios de Terceros asociados a Inversiones en Telemetría y Telecontrol",
+    7402: "Servicios de Terceros asociados a Inversiones en Comunicaciones y Sistemas de Información",
+    7501: "Servicios de Terceros asociados a Adquisición Inmuebles",
+    7502: "Servicios de Terceros asociados a Adquisición Vehículos y equipos",
+    7503: "Servicios de Terceros asociados a Adquisición Bienes Muebles e Insumos",
+}
+
+# Prefijo (2 primeros dígitos del código de recurso) -> familia de gasto
+FAMILIA_PREFIJOS = {
+    11: 'GRH', 12: 'GRH',
+    21: 'GCP',
+    22: 'GGV',
+    23: 'GGI',
+    24: 'GGM',
+    25: 'OGG',
+    31: 'GSC',
+    41: 'MEI',
+    51: 'SOP',
+    61: 'STM', 62: 'STM', 63: 'STM', 64: 'STM', 65: 'STM', 66: 'STM',
+    71: 'STI', 72: 'STI', 73: 'STI', 74: 'STI', 75: 'STI',
+}
+FAMILIA_NOMBRE = {
+    'GRH': 'GRH - Recursos Humanos',
+    'GCP': 'GCP - Gastos Generales de Personal',
+    'GGV': 'GGV - Vehículos y Equipos',
+    'GGI': 'GGI - Bienes Inmuebles',
+    'GGM': 'GGM - Bienes Muebles',
+    'OGG': 'OGG - Otros Gastos Generales',
+    'GSC': 'GSC - Servicios Comerciales y Legales',
+    'MEI': 'MEI - Materiales e Insumos',
+    'SOP': 'SOP - Servicios Operacionales',
+    'STM': 'STM - Servicios de Terceros (Prestaciones Menores)',
+    'STI': 'STI - Servicios de Terceros (Estudios e Inversión)',
+}
+
+def familia_de_recurso(cod):
+    prefijo = cod // 100
+    key = FAMILIA_PREFIJOS.get(prefijo, 'OTR')
+    return FAMILIA_NOMBRE.get(key, 'Otro (' + str(cod) + ')')
+
+def nombre_recurso(cod):
+    return RECURSO_NOMBRE.get(cod, f"Recurso {cod}")
+
+
 RECURSOS_GGM = list(range(2401, 2412))
 RECURSOS_OGG = list(range(2501, 2551))
 RECURSOS_MEI = [4101, 4102, 4103, 4104, 4105, 4106]
@@ -572,6 +782,8 @@ if run:
 
     df = pd.DataFrame(final_rows, columns=HEADERS)
     st.success(f"REP_2 generado con {len(df)} filas (7 familias de gasto consolidadas).")
+    st.session_state['last_final_rows'] = final_rows
+    st.session_state['last_familia_map'] = familia_map
 
     st.subheader("Validación de cuadratura por familia de gasto")
     cols = st.columns(7)
@@ -611,4 +823,154 @@ if run:
         data=excel_bytes,
         file_name="REP_2.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ============================================================================
+# PANEL DE VISUALIZACIÓN: evolución histórica y detección de anomalías
+# ============================================================================
+st.divider()
+st.header("📊 Panel de Visualización")
+st.caption(
+    "Compara el año actual (generado arriba) contra un libro histórico "
+    "consolidado (ej. REP_2_2020-2024.xlsx) para ver la evolución del gasto "
+    "por Familia de Gasto, Código de Recurso y Familia de Servicio, además "
+    "de detectar variaciones interanuales atípicas."
+)
+
+f_historico = st.file_uploader(
+    "Libro histórico consolidado REP_2 (opcional, ej. REP_2_2020-2024.xlsx)",
+    type="xlsx", key="historico_viz"
+)
+
+
+def cargar_historico(file_bytes):
+    if file_bytes is None:
+        return []
+    wb_h = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws_h = wb_h.active
+    return [r for r in ws_h.iter_rows(min_row=2, values_only=True) if r[0] is not None]
+
+
+def gasto_total_fila(r):
+    # Solo GASTO ANUAL (no activado). No se suma MONTO ACTIVADO.
+    return r[7] or 0
+
+
+def detectar_anomalias(evol_dict, nombre_dim):
+    anomalias = []
+    for key, serie_dict in evol_dict.items():
+        anios_serie = sorted(serie_dict.keys())
+        if len(anios_serie) < 2:
+            continue
+        valores = [serie_dict[a] for a in anios_serie]
+        cambios = []
+        for i in range(1, len(valores)):
+            prev, curr = valores[i - 1], valores[i]
+            pct_cambio = None if prev == 0 else (curr - prev) / prev
+            cambios.append((anios_serie[i], prev, curr, pct_cambio))
+        pct_validos = [c[3] for c in cambios if c[3] is not None]
+        if len(pct_validos) >= 3:
+            media = statistics.mean(pct_validos)
+            desv = statistics.stdev(pct_validos)
+        else:
+            media, desv = None, None
+        for anio_actual, prev, curr, pct_cambio in cambios:
+            if pct_cambio is None:
+                continue
+            es_anomalia = False
+            motivo = ""
+            if desv and desv > 1e-9:
+                z = (pct_cambio - media) / desv
+                if abs(z) > 2:
+                    es_anomalia = True
+                    motivo = f"Variación atípica (z={z:.1f}) vs. patrón histórico"
+            else:
+                if abs(pct_cambio) > 0.5:
+                    es_anomalia = True
+                    motivo = "Variación mayor a 50% (serie corta)"
+            if es_anomalia:
+                anomalias.append({
+                    "Dimensión": nombre_dim, "Grupo": key, "Año": anio_actual,
+                    "Valor Año Anterior": round(prev, 0), "Valor Año Actual": round(curr, 0),
+                    "% Variación": round(pct_cambio, 4), "Motivo": motivo,
+                })
+    return anomalias
+
+
+final_rows_actual = st.session_state.get('last_final_rows', [])
+historico_rows = cargar_historico(f_historico.getvalue() if f_historico else None)
+combinado = list(historico_rows) + list(final_rows_actual)
+
+if not combinado:
+    st.info("Genera el REP_2 del año actual arriba y/o sube el libro histórico para ver el panel de visualización.")
+else:
+    anios_disponibles = sorted(set(r[2] for r in combinado))
+
+    evol_familia = defaultdict(lambda: defaultdict(float))
+    evol_recurso = defaultdict(lambda: defaultdict(float))
+    evol_famserv = defaultdict(lambda: defaultdict(float))
+    FAMSERV_NOMBRE = {11: '11 - Servicios Sanitarios (Agua/Alcantarillado)', 12: '12 - Servicios Sanitarios (Otros)', 22: '22 - Servicios No Regulados'}
+
+    for r in combinado:
+        fam = familia_de_recurso(r[4])
+        evol_familia[fam][r[2]] += gasto_total_fila(r)
+        evol_recurso[r[4]][r[2]] += gasto_total_fila(r)
+        evol_famserv[r[5]][r[2]] += gasto_total_fila(r)
+
+    nombre_recurso_map = {cod: f"{cod} - {nombre_recurso(cod)}" for cod in evol_recurso.keys()}
+    famserv_map = {fs: FAMSERV_NOMBRE.get(fs, str(fs)) for fs in evol_famserv.keys()}
+
+    vista = st.radio(
+        "Ver evolución por:",
+        ["Familia de Gasto", "Código de Recurso", "Familia de Servicio"],
+        horizontal=True,
+    )
+
+    if vista == "Familia de Gasto":
+        evol_dict, label_map = evol_familia, {k: k for k in evol_familia}
+    elif vista == "Código de Recurso":
+        evol_dict, label_map = evol_recurso, nombre_recurso_map
+    else:
+        evol_dict, label_map = evol_famserv, famserv_map
+
+    tabla = pd.DataFrame({
+        label_map[k]: [evol_dict[k].get(a, 0) for a in anios_disponibles]
+        for k in evol_dict
+    }, index=anios_disponibles)
+    tabla.index.name = "Año"
+
+    if vista == "Código de Recurso" and len(tabla.columns) > 15:
+        top_cols = tabla.sum(axis=0).sort_values(ascending=False).head(15).index
+        st.caption("Mostrando los 15 códigos de recurso con mayor gasto acumulado (usa la tabla completa para ver el resto).")
+        st.line_chart(tabla[top_cols])
+    else:
+        st.line_chart(tabla)
+
+    with st.expander("Ver tabla de datos"):
+        st.dataframe(tabla.style.format("{:,.0f}"), use_container_width=True)
+
+    # --- Detección de anomalías ---
+    st.subheader("⚠️ Anomalías detectadas (variaciones interanuales atípicas)")
+    anomalias_familia = detectar_anomalias(evol_familia, "Familia de Gasto")
+    anomalias_recurso = detectar_anomalias({nombre_recurso_map[k]: v for k, v in evol_recurso.items()}, "Código de Recurso")
+    anomalias_famserv = detectar_anomalias({famserv_map[k]: v for k, v in evol_famserv.items()}, "Familia de Servicio")
+    todas_anomalias = anomalias_familia + anomalias_recurso + anomalias_famserv
+
+    if todas_anomalias:
+        df_anom = pd.DataFrame(todas_anomalias).sort_values("% Variación", key=lambda s: s.abs(), ascending=False)
+        st.dataframe(
+            df_anom.style.format({
+                "Valor Año Anterior": "{:,.0f}",
+                "Valor Año Actual": "{:,.0f}",
+                "% Variación": "{:+.1%}",
+            }).background_gradient(subset=["% Variación"], cmap="RdYlGn_r"),
+            use_container_width=True,
+        )
+    else:
+        st.success("No se detectaron variaciones interanuales atípicas con los criterios actuales.")
+
+    st.caption(
+        "Criterio: para series con ≥3 variaciones interanuales se usa z-score "
+        "(|z|>2) sobre el propio histórico de cada grupo; para series más "
+        "cortas se marca si la variación supera 50%."
     )
