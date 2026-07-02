@@ -16,6 +16,7 @@ servicios no regulados.
 """
 
 import io
+import difflib
 import statistics
 from collections import defaultdict
 
@@ -283,6 +284,128 @@ RECURSOS_GGM = list(range(2401, 2412))
 RECURSOS_OGG = list(range(2501, 2551))
 RECURSOS_MEI = [4101, 4102, 4103, 4104, 4105, 4106]
 
+# ============================================================================
+# Familia ST - Servicios Tercerizados
+# ============================================================================
+# 29 tablas independientes. Cada tabla puede tener uno o más códigos de
+# recurso (algunas comparten código con otras, ej. ST_22..ST_30 -> 5110;
+# ST_16/ST_17 -> 5106 y 5109 a la vez). Por eso NO se asume un código fijo
+# por archivo: se lee la columna "CÓDIGO RECURSO" de cada fila (igual que
+# GGI_5 / GCP_5), detectando las columnas por NOMBRE de encabezado ya que
+# no se conoce de antemano la estructura exacta de las 29 tablas.
+ST_TABLE_TO_CODES = {
+    "ST_3": [3101], "ST_4": [3102], "ST_5": [3103], "ST_6": [3104],
+    "ST_7": [3105], "ST_8": [3106], "ST_9": [3107], "ST_10": [3108],
+    "ST_11": list(range(3114, 3133)),  # 3114 a 3132
+    "ST_12": [5101], "ST_13": [5102], "ST_14": [5105], "ST_15": [5106],
+    "ST_16": [5106, 5109], "ST_17": [5106, 5109], "ST_18": [5107],
+    "ST_19": [5114], "ST_20": [5108], "ST_21": [5109], "ST_22": [5110],
+    "ST_23": [5110], "ST_25": [5110], "ST_27": [5110], "ST_28": [5110],
+    "ST_29": [5110], "ST_30": [5110], "ST_31": [5111], "ST_32": [5112],
+    "ST_33": [5114], "ST_34": [3133],
+}
+ST_TABLES = list(ST_TABLE_TO_CODES.keys())
+RECURSOS_ST = sorted({c for codes in ST_TABLE_TO_CODES.values() for c in codes})
+
+
+def _normalizar_encabezado(texto):
+    if texto is None:
+        return ""
+    txt = str(texto).upper().strip()
+    for a, b in {"Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U", "Ñ": "N"}.items():
+        txt = txt.replace(a, b)
+    return " ".join(txt.split())
+
+
+def _match_aproximado(palabra, texto_colapsado, umbral=0.82):
+    """True si `palabra` aparece exacta en texto_colapsado, o si existe un
+    tramo de largo similar muy parecido (tolera 1-2 errores de tipeo).
+    Palabras muy cortas (<4 letras) solo se buscan de forma exacta, para
+    evitar falsos positivos."""
+    if palabra in texto_colapsado:
+        return True
+    if len(palabra) < 4:
+        return False
+    n = len(palabra)
+    mejor = 0.0
+    for i in range(0, max(1, len(texto_colapsado) - n + 1) + 3):
+        trozo = texto_colapsado[i:i + n]
+        if not trozo:
+            continue
+        score = difflib.SequenceMatcher(None, palabra, trozo).ratio()
+        if score > mejor:
+            mejor = score
+    return mejor >= umbral
+
+
+def _encontrar_columna(header_row, grupos_palabras_clave, evitar=None):
+    """Busca una columna cuyo encabezado contenga TODAS las palabras clave
+    de algún grupo (en cualquier orden, con o sin espacios entre ellas,
+    tolerando errores de tipeo menores como "Recuso" en vez de "Recurso",
+    o "CódigoRecurso" pegado sin espacio). Prueba los grupos en orden de
+    prioridad y devuelve el índice del primer match. `evitar`: si el
+    encabezado contiene alguna de estas palabras, se descarta la columna
+    (para no confundir columnas parecidas, ej. no tomar "% Activado" como
+    la columna de gasto)."""
+    evitar = evitar or []
+    normalizados = [_normalizar_encabezado(h) for h in header_row]
+    colapsados = [n.replace(" ", "") for n in normalizados]
+
+    for palabras in grupos_palabras_clave:
+        for i, (norm, cole) in enumerate(zip(normalizados, colapsados)):
+            if any(ev in norm for ev in evitar):
+                continue
+            if all(_match_aproximado(p, cole) for p in palabras):
+                return i
+    return None
+
+
+def leer_tabla_st(file_bytes):
+    """Lee una tabla ST_x detectando columnas por nombre de encabezado.
+    Devuelve lista de (cod_recurso, monto_activado, total_gasto_no_activado).
+    Lanza ValueError si no logra identificar las columnas necesarias."""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    header_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+
+    idx_recurso = _encontrar_columna(header_row, [["CODIGO", "RECURSO"], ["COD", "RECURSO"]])
+    idx_activado = _encontrar_columna(header_row, [["MONTO", "ANUAL", "ACTIVADO"], ["MONTO", "ACTIVADO"]])
+    idx_gasto = _encontrar_columna(
+        header_row,
+        [["TOTAL", "GASTO", "ANUAL"], ["GASTO", "ANUAL", "NO", "ACTIVADO"], ["TOTAL", "GASTO"], ["GASTO"]],
+        evitar=["ACTIVADO", "%"],
+    )
+
+    faltantes = []
+    if idx_recurso is None:
+        faltantes.append("CÓDIGO RECURSO")
+    if idx_activado is None:
+        faltantes.append("MONTO ANUAL ACTIVADO")
+    if idx_gasto is None:
+        faltantes.append("TOTAL GASTO ANUAL")
+    if faltantes:
+        raise ValueError(f"No se identificaron las columnas: {', '.join(faltantes)}")
+
+    filas = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        cod_recurso = row[idx_recurso]
+        if cod_recurso is None:
+            continue
+        filas.append((cod_recurso, row[idx_activado] or 0, row[idx_gasto] or 0))
+    return filas
+
+
+def identificar_tabla_st(nombre_archivo):
+    """Extrae 'ST_<n>' del nombre de archivo subido, sin importar mayúsculas,
+    extensión, o sufijos. Devuelve None si no matchea ningún ST_x conocido."""
+    base = nombre_archivo.upper().replace(".XLSX", "").replace(".XLS", "")
+    for tabla in ST_TABLES:
+        if base == tabla or base.startswith(tabla + "_") or base.startswith(tabla + "-"):
+            return tabla
+    return None
+
 
 def read_rows(file_bytes):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
@@ -319,23 +442,53 @@ def procesar_familia_plana(agg, EMPRESA, PERIODO, ANIO, SECTOR, tablas_specs, pa
     return by_recurso
 
 
-def build_rep2(fb, ggm_params, ogg_params, mei_params):
-    grh8 = read_rows(fb["grh8"])
-    grh11 = read_rows(fb["grh11"])
-    gcp4 = read_rows(fb["gcp4"])
-    gcp5 = read_rows(fb["gcp5"])
-    ggv4 = read_rows(fb["ggv4"])
-    ggv5 = read_rows(fb["ggv5"])
-    ggi5 = read_rows(fb["ggi5"])
-    ggm_tablas = [read_rows(fb[f"ggm{i}"]) for i in range(1, 6)]
-    ogg5 = read_rows(fb["ogg5"])
-    mei1 = read_rows(fb["mei1"])
-    mei2 = read_rows(fb["mei2"])
-    mei3 = read_rows(fb["mei3"])
-    mei4 = read_rows(fb["mei4"])
+def safe_read_rows(file_bytes, etiqueta, avisos):
+    """Como read_rows, pero tolera archivo ausente (None) o con error de
+    lectura: registra un aviso y devuelve lista vacía en vez de fallar."""
+    if file_bytes is None:
+        avisos.append(f"⚠️ Falta la tabla **{etiqueta}** — se excluye del cálculo (esa familia/recurso queda en 0 o incompleto).")
+        return []
+    try:
+        filas = read_rows(file_bytes)
+    except Exception as e:
+        avisos.append(f"⚠️ No se pudo leer **{etiqueta}** ({e}) — se excluye del cálculo.")
+        return []
+    if len(filas) == 0:
+        avisos.append(f"ℹ️ La tabla **{etiqueta}** está vacía (sin filas de datos).")
+    return filas
+
+
+def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params):
+    avisos = []
+
+    grh8 = safe_read_rows(fb.get("grh8"), "GRH_8", avisos)
+    grh11 = safe_read_rows(fb.get("grh11"), "GRH_11", avisos)
+    gcp4 = safe_read_rows(fb.get("gcp4"), "GCP_4", avisos)
+    gcp5 = safe_read_rows(fb.get("gcp5"), "GCP_5", avisos)
+    ggv4 = safe_read_rows(fb.get("ggv4"), "GGV_4", avisos)
+    ggv5 = safe_read_rows(fb.get("ggv5"), "GGV_5", avisos)
+    ggi5 = safe_read_rows(fb.get("ggi5"), "GGI_5", avisos)
+    ggm_tablas = [safe_read_rows(fb.get(f"ggm{i}"), f"GGM_{i}", avisos) for i in range(1, 6)]
+    ogg5 = safe_read_rows(fb.get("ogg5"), "OGG_5", avisos)
+    mei1 = safe_read_rows(fb.get("mei1"), "MEI_1", avisos)
+    mei2 = safe_read_rows(fb.get("mei2"), "MEI_2", avisos)
+    mei3 = safe_read_rows(fb.get("mei3"), "MEI_3", avisos)
+    mei4 = safe_read_rows(fb.get("mei4"), "MEI_4", avisos)
 
     agg = defaultdict(lambda: [0.0, 0.0])
-    EMPRESA, PERIODO, ANIO, SECTOR = grh8[0][0], grh8[0][1], grh8[0][2], grh8[0][3]
+
+    # EMPRESA/PERIODO/AÑO/SECTOR: se toman del primer archivo disponible,
+    # ya que si falta GRH_8 no podemos asumir esos valores desde ahí.
+    EMPRESA = PERIODO = ANIO = SECTOR = None
+    for candidato in [grh8, gcp4, ggv4, ggi5, ogg5] + ggm_tablas + [mei1, mei2, mei3, mei4]:
+        if candidato:
+            EMPRESA, PERIODO, ANIO, SECTOR = candidato[0][0], candidato[0][1], candidato[0][2], candidato[0][3]
+            break
+    if EMPRESA is None:
+        for filas_st in st_files.values():
+            if filas_st:
+                EMPRESA, PERIODO, ANIO, SECTOR = filas_st[0][0], filas_st[0][1], filas_st[0][2], filas_st[0][3]
+                break
 
     # --- GRH ---
     shares_persona = defaultdict(list)
@@ -419,6 +572,35 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params):
         mei_params
     )
 
+    # --- ST: Servicios Tercerizados (29 tablas, lectura por nombre de columna) ---
+    st_by_recurso = defaultdict(lambda: [0.0, 0.0])
+    tablas_st_faltantes = [t for t in ST_TABLES if t not in st_files]
+    if tablas_st_faltantes:
+        avisos.append(
+            f"⚠️ Faltan {len(tablas_st_faltantes)} tabla(s) ST: {', '.join(tablas_st_faltantes)} "
+            "— se excluyen del cálculo (sus códigos de recurso quedan en 0)."
+        )
+    for nombre_tabla, filas_st in st_files.items():
+        if len(filas_st) == 0:
+            avisos.append(f"ℹ️ La tabla **{nombre_tabla}** está vacía (sin filas de datos).")
+            continue
+        for cod_recurso, monto_act, total_gasto in filas_st:
+            overrides = st_params.get(cod_recurso, [])
+            pct_reg = 1.0 - sum(p for _, p in overrides)
+            fam = familia(1101)
+            k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
+            agg[k][0] += total_gasto * pct_reg
+            agg[k][1] += monto_act * pct_reg
+            st_by_recurso[cod_recurso][0] += total_gasto * pct_reg
+            st_by_recurso[cod_recurso][1] += monto_act * pct_reg
+            for cod_serv_noreg, pct in overrides:
+                fam2 = familia(cod_serv_noreg)
+                k2 = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam2)
+                agg[k2][0] += total_gasto * pct
+                agg[k2][1] += monto_act * pct
+                st_by_recurso[cod_recurso][0] += total_gasto * pct
+                st_by_recurso[cod_recurso][1] += monto_act * pct
+
     # --- Normalizar % por recurso ---
     tot_no_act = defaultdict(float)
     tot_act = defaultdict(float)
@@ -439,7 +621,7 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params):
             round(pct_act, 4) if a > 0 else 0.0, round(a, 2),
         ])
 
-    # --- Validaciones ---
+    # --- Validaciones (solo entre familias con datos disponibles) ---
     recursos_grh = set(r[6] for r in grh8)
     recursos_gcp = set(r[6] for r in gcp4)
     recursos_ggv = set(r[5] for r in ggv4)
@@ -447,6 +629,7 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params):
     recursos_ggm = set(ggm_by_recurso.keys())
     recursos_ogg = set(ogg_by_recurso.keys())
     recursos_mei = set(mei_by_recurso.keys())
+    recursos_st = set(st_by_recurso.keys())
 
     def validar(recursos, sum_gasto_fuente, sum_act_fuente):
         sum_gasto_rep2 = sum(r[7] for r in final_rows if r[4] in recursos)
@@ -456,15 +639,23 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params):
             "diff_act": sum_act_rep2 - sum_act_fuente,
         }
 
-    checks = {
-        "GRH": validar(recursos_grh, sum(r[10] for r in grh8), sum(r[8] for r in grh8)),
-        "GCP": validar(recursos_gcp, sum(r[10] for r in gcp4), sum(r[8] for r in gcp4)),
-        "GGV": validar(recursos_ggv, sum(r[9] for r in ggv4), sum(r[7] for r in ggv4)),
-        "GGI": validar(recursos_ggi, sum(r[6] for r in ggi5), 0),
-        "GGM": validar(recursos_ggm, sum(v[0] for v in ggm_by_recurso.values()), sum(v[1] for v in ggm_by_recurso.values())),
-        "OGG": validar(recursos_ogg, sum(v[0] for v in ogg_by_recurso.values()), sum(v[1] for v in ogg_by_recurso.values())),
-        "MEI": validar(recursos_mei, sum(v[0] for v in mei_by_recurso.values()), sum(v[1] for v in mei_by_recurso.values())),
-    }
+    checks = {}
+    if grh8:
+        checks["GRH"] = validar(recursos_grh, sum(r[10] for r in grh8), sum(r[8] for r in grh8))
+    if gcp4:
+        checks["GCP"] = validar(recursos_gcp, sum(r[10] for r in gcp4), sum(r[8] for r in gcp4))
+    if ggv4:
+        checks["GGV"] = validar(recursos_ggv, sum(r[9] for r in ggv4), sum(r[7] for r in ggv4))
+    if ggi5:
+        checks["GGI"] = validar(recursos_ggi, sum(r[6] for r in ggi5), 0)
+    if ggm_by_recurso:
+        checks["GGM"] = validar(recursos_ggm, sum(v[0] for v in ggm_by_recurso.values()), sum(v[1] for v in ggm_by_recurso.values()))
+    if ogg_by_recurso:
+        checks["OGG"] = validar(recursos_ogg, sum(v[0] for v in ogg_by_recurso.values()), sum(v[1] for v in ogg_by_recurso.values()))
+    if mei_by_recurso:
+        checks["MEI"] = validar(recursos_mei, sum(v[0] for v in mei_by_recurso.values()), sum(v[1] for v in mei_by_recurso.values()))
+    if st_by_recurso:
+        checks["ST"] = validar(recursos_st, sum(v[0] for v in st_by_recurso.values()), sum(v[1] for v in st_by_recurso.values()))
 
     familia_map = {}
     for c in recursos_grh: familia_map[c] = "GRH - Gastos Recursos Humanos"
@@ -474,12 +665,14 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params):
     for c in recursos_ggm: familia_map[c] = "GGM - Gastos Generales Bienes Muebles"
     for c in recursos_ogg: familia_map[c] = "OGG - Otros Gastos Generales"
     for c in recursos_mei: familia_map[c] = "MEI - Materiales e Insumos"
+    for c in recursos_st: familia_map[c] = "ST - Servicios Tercerizados"
 
-    by_recurso_planas = {"GGM": ggm_by_recurso, "OGG": ogg_by_recurso, "MEI": mei_by_recurso}
-    return final_rows, checks, familia_map, by_recurso_planas
+    by_recurso_planas = {"GGM": ggm_by_recurso, "OGG": ogg_by_recurso, "MEI": mei_by_recurso, "ST": st_by_recurso}
+    return final_rows, checks, familia_map, by_recurso_planas, avisos
 
 
-def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, template_bytes=None):
+def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, avisos=None, template_bytes=None):
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "REP_2"
@@ -539,7 +732,7 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, t
         "GRH - Gastos Recursos Humanos", "GCP - Gastos Generales de Personal",
         "GGV - Gastos Generales Vehículos y Equipos", "GGI - Gastos Generales Bienes Inmuebles",
         "GGM - Gastos Generales Bienes Muebles", "OGG - Otros Gastos Generales",
-        "MEI - Materiales e Insumos",
+        "MEI - Materiales e Insumos", "ST - Servicios Tercerizados",
     ]
     for fg in orden_familias:
         if fg in resumen:
@@ -629,6 +822,23 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, t
         except Exception:
             pass
 
+    # Avisos de carga (tablas faltantes o vacías, generación parcial)
+    if avisos:
+        ws5 = wb.create_sheet("Avisos_Carga")
+        ws5.append(["Aviso"])
+        cell = ws5.cell(row=1, column=1)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = border
+        for aviso in avisos:
+            ws5.append([aviso.replace("**", "")])
+        for r in range(2, ws5.max_row + 1):
+            cell = ws5.cell(row=r, column=1)
+            cell.font = data_font
+            cell.border = border
+            cell.alignment = Alignment(wrap_text=True, vertical='top')
+        ws5.column_dimensions["A"].width = 110
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -686,6 +896,7 @@ st.caption(
 
 with st.sidebar:
     st.header("Archivos de entrada")
+    st.caption("Todos los archivos son opcionales: puedes generar REP_2 con lo que tengas disponible.")
     st.markdown("**GRH — Recursos Humanos**")
     f_grh8 = st.file_uploader("GRH_8.xlsx", type="xlsx", key="grh8")
     f_grh11 = st.file_uploader("GRH_11.xlsx", type="xlsx", key="grh11")
@@ -710,34 +921,45 @@ with st.sidebar:
     f_mei2 = st.file_uploader("MEI_2.xlsx", type="xlsx", key="mei2")
     f_mei3 = st.file_uploader("MEI_3.xlsx", type="xlsx", key="mei3")
     f_mei4 = st.file_uploader("MEI_4.xlsx", type="xlsx", key="mei4")
+    st.markdown("**ST — Servicios Tercerizados (29 tablas)**")
+    st.caption("Sube cualquier subconjunto de ST_3.xlsx a ST_34.xlsx (se identifican por nombre de archivo).")
+    f_st_files = st.file_uploader(
+        "Tablas ST (selección múltiple)", type="xlsx", key="st_files", accept_multiple_files=True
+    )
     st.markdown("**Plantilla (opcional)**")
     f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
 
-    required = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
-                f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
-                f_mei1, f_mei2, f_mei3, f_mei4]
-    all_ready = all(required)
+    archivos_regulares = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
+                           f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
+                           f_mei1, f_mei2, f_mei3, f_mei4]
+    hay_algo_cargado = any(archivos_regulares) or bool(f_st_files)
 
 st.markdown(
     """
 **Lógica aplicada**
 - **GRH / GGV**: % de dedicación (por persona o por activo) aplicado a los montos de gasto.
 - **GCP / GGI**: ya vienen abiertas por recurso y servicio.
-- **GGM / OGG / MEI**: sin apertura por servicio — por defecto 100% va al
+- **GGM / OGG / MEI / ST**: sin apertura por servicio — por defecto 100% va al
   servicio regulado 1101; se puede parametrizar % a servicios no regulados
   en los paneles de abajo.
+- **Generación parcial**: puedes generar REP_2 con solo algunas tablas
+  cargadas. Las familias/recursos sin datos quedan en 0, y se muestra un
+  aviso detallado de qué faltó o llegó vacío.
     """
 )
 
 st.subheader("Parametrización opcional — familias sin apertura por servicio")
 st.caption("Por defecto todo el gasto se asigna 100% al servicio regulado 1101.")
 
-with st.expander("Configurar parametrización GGM / OGG / MEI", expanded=False):
+with st.expander("Configurar parametrización GGM / OGG / MEI / ST", expanded=False):
     ggm_params = panel_parametrizacion("GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_overrides")
     st.divider()
     ogg_params = panel_parametrizacion("OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_overrides")
     st.divider()
     mei_params = panel_parametrizacion("MEI (recursos 4101-4106)", RECURSOS_MEI, "mei_overrides")
+    st.divider()
+    st.caption("ST: algunos códigos son compartidos por varias tablas (ej. 5110 en ST_22 a ST_30); la parametrización se aplica por código de recurso, no por tabla.")
+    st_params = panel_parametrizacion("ST (Servicios Tercerizados)", RECURSOS_ST, "st_overrides")
 
 if "ggm_overrides" not in st.session_state:
     ggm_params = {}
@@ -745,6 +967,8 @@ if "ogg_overrides" not in st.session_state:
     ogg_params = {}
 if "mei_overrides" not in st.session_state:
     mei_params = {}
+if "st_overrides" not in st.session_state:
+    st_params = {}
 
 # Validar overflow > 100%
 def check_overflow(params):
@@ -754,39 +978,73 @@ overflow = {}
 overflow.update(check_overflow(ggm_params))
 overflow.update(check_overflow(ogg_params))
 overflow.update(check_overflow(mei_params))
+overflow.update(check_overflow(st_params))
 if overflow:
     st.error(f"La suma de % parametrizados supera 100% para el(los) recurso(s): {list(overflow.keys())}. Ajusta los valores.")
 
-run = st.button("Generar REP_2", type="primary", disabled=not all_ready or bool(overflow))
+run = st.button("Generar REP_2", type="primary", disabled=not hay_algo_cargado or bool(overflow))
 
-if not all_ready:
-    st.info("Sube los 17 archivos requeridos en el panel izquierdo para habilitar la generación.")
+if not hay_algo_cargado:
+    st.info("Sube al menos un archivo en el panel izquierdo para habilitar la generación (puede ser parcial).")
 
 if run:
     fb = {
-        "grh8": f_grh8.getvalue(), "grh11": f_grh11.getvalue(),
-        "gcp4": f_gcp4.getvalue(), "gcp5": f_gcp5.getvalue(),
-        "ggv4": f_ggv4.getvalue(), "ggv5": f_ggv5.getvalue(),
-        "ggi5": f_ggi5.getvalue(),
-        "ggm1": f_ggm1.getvalue(), "ggm2": f_ggm2.getvalue(), "ggm3": f_ggm3.getvalue(),
-        "ggm4": f_ggm4.getvalue(), "ggm5": f_ggm5.getvalue(),
-        "ogg5": f_ogg5.getvalue(),
-        "mei1": f_mei1.getvalue(), "mei2": f_mei2.getvalue(),
-        "mei3": f_mei3.getvalue(), "mei4": f_mei4.getvalue(),
+        "grh8": f_grh8.getvalue() if f_grh8 else None,
+        "grh11": f_grh11.getvalue() if f_grh11 else None,
+        "gcp4": f_gcp4.getvalue() if f_gcp4 else None,
+        "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
+        "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
+        "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
+        "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
+        "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
+        "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
+        "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
+        "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
+        "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
+        "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
+        "mei1": f_mei1.getvalue() if f_mei1 else None,
+        "mei2": f_mei2.getvalue() if f_mei2 else None,
+        "mei3": f_mei3.getvalue() if f_mei3 else None,
+        "mei4": f_mei4.getvalue() if f_mei4 else None,
     }
+
+    st_files = {}
+    avisos_carga_archivos = []
+    for f in (f_st_files or []):
+        tabla = identificar_tabla_st(f.name)
+        if tabla is None:
+            avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla ST_3..ST_34 conocida; se ignora.")
+            continue
+        try:
+            st_files[tabla] = leer_tabla_st(f.getvalue())
+        except Exception as e:
+            avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
+
     try:
-        final_rows, checks, familia_map, by_recurso_planas = build_rep2(fb, ggm_params, ogg_params, mei_params)
+        final_rows, checks, familia_map, by_recurso_planas, avisos = build_rep2(
+            fb, ggm_params, ogg_params, mei_params, st_files, st_params
+        )
+        avisos = avisos_carga_archivos + avisos
     except Exception as e:
         st.error(f"Error procesando los archivos: {e}")
         st.stop()
 
     df = pd.DataFrame(final_rows, columns=HEADERS)
-    st.success(f"REP_2 generado con {len(df)} filas (7 familias de gasto consolidadas).")
+    if len(df) == 0:
+        st.error("No se generó ninguna fila. Revisa que al menos una tabla tenga datos válidos.")
+        st.stop()
+    st.success(f"REP_2 generado con {len(df)} filas.")
     st.session_state['last_final_rows'] = final_rows
     st.session_state['last_familia_map'] = familia_map
 
+    if avisos:
+        with st.expander(f"⚠️ Avisos de carga ({len(avisos)})", expanded=True):
+            for aviso in avisos:
+                st.markdown(f"- {aviso}")
+
     st.subheader("Validación de cuadratura por familia de gasto")
-    cols = st.columns(7)
+    st.caption("Solo se muestran las familias con datos cargados.")
+    cols = st.columns(max(len(checks), 1))
     all_ok = True
     for col, (fam, chk) in zip(cols, checks.items()):
         with col:
@@ -813,10 +1071,11 @@ if run:
         use_container_width=True,
     )
 
-    params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params}
+    params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
     excel_bytes = build_excel(
         final_rows, familia_map, by_recurso_planas, params_by_familia,
-        f_template.getvalue() if f_template else None
+        avisos=avisos,
+        template_bytes=f_template.getvalue() if f_template else None,
     )
     st.download_button(
         "Descargar REP_2.xlsx",
