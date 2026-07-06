@@ -16,6 +16,7 @@ servicios no regulados.
 """
 
 import io
+import re
 import difflib
 import statistics
 from collections import defaultdict
@@ -509,6 +510,127 @@ def redondear_para_sumar_100(valores, decimales=4):
     return [a / escala for a in ajustados]
 
 
+def fusionar_cola_larga(items, piso=0.01, id_fusion="-1"):
+    """Si hay demasiadas sub-claves para que todas alcancen el piso mínimo
+    individualmente (n * piso >= 1.0), fusiona las de MENOR monto bajo
+    id_fusion ('-1', el código que el maestro SISS reserva para 'sin cliente
+    específico'), dejando como entradas individuales solo las que sí pueden
+    alcanzar el piso con margen para variación proporcional.
+
+    items: [(sub, monto), ...] donde 'sub' puede ser un valor simple (ej. el
+    ID cliente) o una tupla (ej. (cod_servicio, id_cliente)). En este último
+    caso, la fusión agrupa la 'cola' POR EL RESTO DE LA TUPLA (ej. por
+    servicio) y reemplaza solo el último componente por id_fusion, de forma
+    que cada fila fusionada siga siendo válida (ej. conserva su servicio).
+
+    Devuelve (nuevos_items, se_fusiono)."""
+    n = len(items)
+    max_individuales = int(1.0 / piso) - 1
+    if n <= max_individuales:
+        return items, False
+
+    items_ordenados = sorted(items, key=lambda x: x[1], reverse=True)
+    individuales = items_ordenados[:max_individuales - 1]
+    cola = items_ordenados[max_individuales - 1:]
+
+    nuevos = list(individuales)
+    if cola and isinstance(cola[0][0], tuple):
+        # Agrupar la cola por el resto de la tupla (ej. por servicio),
+        # reemplazando solo el último componente (ej. el cliente) por id_fusion.
+        cola_por_grupo = defaultdict(float)
+        for sub, monto in cola:
+            clave_grupo = sub[:-1]
+            cola_por_grupo[clave_grupo] += monto
+        existentes = {s[0][:-1]: i for i, s in enumerate(nuevos) if s[0][-1] == id_fusion}
+        for clave_grupo, monto in cola_por_grupo.items():
+            nuevo_sub = clave_grupo + (id_fusion,)
+            if clave_grupo in existentes:
+                idx = existentes[clave_grupo]
+                nuevos[idx] = (nuevos[idx][0], nuevos[idx][1] + monto)
+            else:
+                nuevos.append((nuevo_sub, monto))
+    else:
+        monto_cola = sum(m for _, m in cola)
+        fusion_existente = False
+        for i, (cid, m) in enumerate(nuevos):
+            if cid == id_fusion:
+                nuevos[i] = (cid, m + monto_cola)
+                fusion_existente = True
+                break
+        if not fusion_existente:
+            nuevos.append((id_fusion, monto_cola))
+    return nuevos, True
+
+
+def aplicar_piso_minimo(fracciones, piso=0.01):
+    """Ajusta una lista de fracciones (que suman ~1.0) para que NINGUNA
+    quede por debajo de 'piso' (ej. 0.01 = 1%), redistribuyendo
+    proporcionalmente el resto entre las demás ("water-filling"). Se usa en
+    CYG_9 para cumplir la regla del maestro SISS de no declarar registros
+    con % de dedicación igual a 0 (ni prácticamente 0), sin dejar de listar
+    a todos los clientes que efectivamente reciben una porción del gasto.
+    Si hay demasiadas entradas para que todas alcancen el piso (n*piso >= 1),
+    se reparte equitativamente entre todas como mejor esfuerzo."""
+    n = len(fracciones)
+    if n == 0:
+        return []
+    if n * piso >= 1.0:
+        return [1.0 / n] * n
+
+    resultado = [0.0] * n
+    restantes = list(range(n))
+    masa_restante = 1.0
+
+    while True:
+        suma_raw = sum(fracciones[i] for i in restantes)
+        candidatos_bajo_piso = []
+        for i in restantes:
+            val = (fracciones[i] / suma_raw * masa_restante) if suma_raw > 0 else (masa_restante / len(restantes))
+            if val < piso:
+                candidatos_bajo_piso.append(i)
+
+        if not candidatos_bajo_piso:
+            for i in restantes:
+                resultado[i] = (fracciones[i] / suma_raw * masa_restante) if suma_raw > 0 else (masa_restante / len(restantes))
+            break
+
+        for i in candidatos_bajo_piso:
+            resultado[i] = piso
+            restantes.remove(i)
+            masa_restante -= piso
+
+        if not restantes:
+            break
+        if len(restantes) * piso >= masa_restante:
+            for i in restantes:
+                resultado[i] = masa_restante / len(restantes)
+            break
+
+    return resultado
+
+
+def normalizar_con_piso_minimo(items_por_clave, piso=0.01, decimales=4):
+    """Como _normalizar_por_clave, pero garantiza que ningún % quede por
+    debajo de 'piso' (ej. 0.01 = 1%). Si hay demasiadas sub-claves (ej.
+    clientes) para que todas alcancen el piso, primero fusiona la cola de
+    menor monto bajo el identificador '-1' (fusionar_cola_larga), y luego
+    aplica el piso mínimo (aplicar_piso_minimo) sobre el conjunto resultante.
+    Devuelve también, por clave, si hubo fusión (para poder avisar)."""
+    resultado = {}
+    hubo_fusion = {}
+    for clave, items in items_por_clave.items():
+        total = sum(g for _, g in items)
+        if total == 0:
+            continue
+        items_fusionados, se_fusiono = fusionar_cola_larga(items, piso=piso, id_fusion="-1")
+        hubo_fusion[clave] = se_fusiono
+        fracciones_raw = [g / total for _, g in items_fusionados]
+        fracciones_piso = aplicar_piso_minimo(fracciones_raw, piso)
+        pcts = redondear_para_sumar_100(fracciones_piso, decimales)
+        resultado[clave] = [(sub, pct, pct * total) for (sub, _), pct in zip(items_fusionados, pcts)]
+    return resultado, hubo_fusion
+
+
 def procesar_familia_plana(agg, EMPRESA, PERIODO, ANIO, SECTOR, tablas_specs, params):
     by_recurso = defaultdict(lambda: [0.0, 0.0])
     for filas, idx_r, idx_a, idx_g in tablas_specs:
@@ -736,14 +858,14 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
         total_g = sum(g for _, g, _ in items)
         total_a = sum(a for _, _, a in items)
 
-        idx_g_pos = [i for i, (_, g, _) in enumerate(items) if g > 0]
+        idx_g_pos = [i for i, (_, g, _) in enumerate(items) if abs(g) > 1e-9]
         fracciones_g = [items[i][1] / total_g for i in idx_g_pos] if total_g else []
         pcts_g_corr = redondear_para_sumar_100(fracciones_g, 4) if fracciones_g else []
         pct_g_final = {i: 0.0 for i in range(len(items))}
         for idx, pct in zip(idx_g_pos, pcts_g_corr):
             pct_g_final[idx] = pct
 
-        idx_a_pos = [i for i, (_, _, a) in enumerate(items) if a > 0]
+        idx_a_pos = [i for i, (_, _, a) in enumerate(items) if abs(a) > 1e-9]
         fracciones_a = [items[i][2] / total_a for i in idx_a_pos] if total_a else []
         pcts_a_corr = redondear_para_sumar_100(fracciones_a, 4) if fracciones_a else []
         pct_a_final = {i: 0.0 for i in range(len(items))}
@@ -754,8 +876,8 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
             empresa, periodo, anio, sector, _, fam = key
             final_rows.append([
                 empresa, periodo, anio, sector, cod_recurso, fam,
-                pct_g_final[i], round(g, 2),
-                pct_a_final[i], round(a, 2),
+                round(pct_g_final[i] * 100, 2), round(g, 2),
+                round(pct_a_final[i] * 100, 2), round(a, 2),
             ])
 
     final_rows.sort(key=lambda r: (r[4], r[5]))
@@ -844,7 +966,7 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, g
             cell.font = data_font
             cell.border = border
             if c in (7, 9):
-                cell.number_format = "0.00%"
+                cell.number_format = "0.00"
             elif c in (8, 10):
                 cell.number_format = '#,##0;(#,##0);"-"'
             else:
@@ -927,7 +1049,7 @@ def build_excel(final_rows, familia_map, by_recurso_planas, params_by_familia, g
             if c == 3:
                 cell.number_format = '#,##0;(#,##0);"-"'
             if c == 6 and isinstance(ws3.cell(row=r, column=6).value, float):
-                cell.number_format = "0.00%"
+                cell.number_format = "0.00"
     ws3.column_dimensions["A"].width = 10
     ws3.column_dimensions["B"].width = 16
     ws3.column_dimensions["C"].width = 22
@@ -1569,10 +1691,715 @@ def build_rep3(fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_para
         fracciones = [g / total_grupo for _, g in items]
         pcts = redondear_para_sumar_100(fracciones, 4)
         for (proceso, gasto), pct in zip(items, pcts):
-            final_rows3.append([EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam, proceso, pct, round(gasto, 2)])
+            final_rows3.append([EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam, proceso, round(pct * 100, 2), round(gasto, 2)])
 
     final_rows3.sort(key=lambda r: (r[4], r[5], r[6]))
     return final_rows3, avisos3
+
+
+
+# ============================================================================
+# CYG - Costos y Gastos por Recurso (CYG_1 a CYG_4, CYG_8, CYG_9)
+# ============================================================================
+# CYG_1: Recursos - Servicios Continuos AP/AS (servicios 1101, 1102)
+# CYG_2: Recursos - Prestaciones Asociadas Reguladas (servicios 1201-1205)
+# CYG_3: Recursos - Prestaciones Asociadas No Reguladas (servicios 2101-2117)
+# CYG_4: Recursos - Servicios No Regulados (servicios 2201-2214)
+# CYG_8: Recursos de Servicios Continuos - Actividades (solo gasto regulado)
+# CYG_9: Recursos de Servicios No Regulados - Servicios Prestados a Terceros
+#        (abre por ID CLIENTE usando MCO_42 + ING_4)
+#
+# IMPORTANTE: a diferencia de REP_2 (que colapsa los servicios en su FAMILIA
+# 11/12/22) y de REP_3 (que colapsa las actividades en su PROCESO), las
+# tablas CYG necesitan el código de SERVICIO ESPECÍFICO (ej. 1201, no solo
+# "12") y el código de ACTIVIDAD ESPECÍFICO (ej. 4010101, no solo "401").
+# Por eso CYG se construye SIEMPRE desde las tablas fuente, nunca desde
+# REP_2/REP_3 ya agregados. REP_2 y REP_3 solo se usan como checkpoint de
+# validación de cuadratura.
+
+# --- Mapeo CÓDIGO OBRA TIPO NBI -> CÓDIGO ACTIVIDAD (exclusivo de MEI_1) ---
+# Aportado por el usuario: reemplaza cualquier supuesto/estimación previa.
+# El código de proceso se deriva de esta actividad (primeros 3 dígitos).
+OBRA_NBI_A_ACTIVIDAD = {
+    101: 1030401,  # Captación en Río (proceso 103)
+    102: 1030402,  # Captación en Canal (proceso 103)
+    103: 1030403,  # Captación en Lago o Embalse (proceso 103)
+    104: 1030404,  # Captación en Mar (proceso 103)
+    201: 1030302,  # Captación mediante Drenes y Galerías (proceso 103)
+    202: 1030304,  # Captación mediante Punteras (proceso 103)
+    203: 1030303,  # Captación mediante Sondajes (proceso 103)
+    204: 1030301,  # Captación mediante Norias (proceso 103)
+    301: 1031101,  # Plantas Elevadoras de Agua Potable Tipo A (proceso 103)
+    302: 1031101,  # Plantas Elevadoras de Agua Potable Tipo B (proceso 103)
+    303: 1031101,  # Plantas Elevadoras de Agua Potable Tipo C (proceso 103)
+    304: 1031101,  # Plantas Elevadoras de Agua Potable Tipo D (proceso 103)
+    305: 1031101,  # Plantas Elevadoras de Agua Potable Tipo E (proceso 103)
+    351: 2020301,  # Plantas Elevadoras de Aguas Servidas (proceso 202)
+    401: 1050101,  # Estanques Semienterrados y Enterrados (proceso 105)
+    402: 1050102,  # Estanques Elevados (proceso 105)
+    501: 1030601,  # Plantas de Tratamiento de Agua Potable excepto Osmosis Inversa (proceso 103)
+    502: 1030604,  # Plantas de Tratamiento de Agua Potable de Osmosis Inversa (proceso 103)
+    601: 1030801,  # Sistemas de Desinfección de Agua Potable (proceso 103)
+    701: 1030902,  # Sistemas de Fluoración (proceso 103)
+    801: 1060101,  # Red de Distribución (proceso 106)
+    901: 2030301,  # Red de Recolección (proceso 203)
+    1001: 3080101,  # Arranques (proceso 308)
+    1002: 3070302,  # Medidores (proceso 307)
+    1003: 3110301,  # Uniones Domiciliarias (proceso 311)
+    1101: 1040101,  # Conducciones de AP (proceso 104)
+    1151: 2030101,  # Conducciones de AS (proceso 203)
+    1201: 2040404,  # Tabla General de Sistemas de Tratamiento de Aguas Servidas (proceso 204)
+    1202: 2040501,  # Pretratamiento de Aguas Servidas (proceso 204)
+    1203: 2040401,  # Tratamiento Primario de Aguas Servidas (proceso 204)
+    1204: 2040401,  # Tratamiento Secundario de Aguas Servidas (proceso 204)
+    1205: 2040404,  # Desinfección y Decloración en Plantas de Tratamiento de Aguas Servidas (proceso 204)
+    1206: 2040404,  # Línea de Lodos de Plantas de Tratamiento de Aguas Servidas (proceso 204)
+    1207: 2040601,  # Emisario Submarino - Información General (proceso 204)
+    1208: 2040601,  # Emisario Submarino - Información por Tramos (proceso 204)
+    1209: 2041001,  # Control Olores, Generador y Aforos en Plantas de Tratamiento de Aguas Servidas (proceso 204)
+    1402: 3010901,  # Macromedidores (proceso 301)
+    1403: 3011101,  # Reductoras de Presión (proceso 301)
+    1404: 3011001,  # Anti Golpe de Ariete (proceso 301)
+}
+
+# --- Catálogo completo Proceso -> [Actividades] (para defaults GGI/GGM/OGG/GPA) ---
+PROCESO_A_ACTIVIDADES = {
+    101: [1010101, 1010201, 1010301, 1010302, 1010303, 1010304, 1010305, 1010306, 1010307],
+    102: [1020101, 1020201, 1020301, 1020302, 1020303, 1020304],
+    103: [1030101, 1030201, 1030202, 1030301, 1030302, 1030303, 1030304, 1030401, 1030402, 1030403, 1030404, 1030501, 1030502, 1030503, 1030504, 1030505, 1030601, 1030602, 1030603, 1030604, 1030605, 1030701, 1030702, 1030703, 1030704, 1030705, 1030801, 1030802, 1030803, 1030901, 1030902, 1030903, 1031001, 1031002, 1031101, 1031201, 1031202],
+    104: [1040101, 1040201, 1040301, 1040302, 1040303, 1040304, 1040305, 1040306, 1040307, 1040308, 1040309, 1040401],
+    105: [1050101, 1050102],
+    106: [1060101, 1060102, 1060201, 1060202, 1060203, 1060204, 1060205, 1060301, 1060302],
+    201: [2010101, 2010201, 2010301, 2010302, 2010303, 2010304, 2010305, 2010306, 2010307],
+    202: [2020101, 2020102, 2020103, 2020201, 2020301],
+    203: [2030101, 2030201, 2030301],
+    204: [2040101, 2040102, 2040103, 2040104, 2040201, 2040301, 2040401, 2040402, 2040403, 2040404, 2040405, 2040501, 2040601, 2040701, 2040702, 2040703, 2040704, 2040705, 2040801, 2040802, 2040901, 2040902, 2040903, 2040904, 2041001],
+    301: [3010101, 3010201, 3010301, 3010401, 3010501, 3010601, 3010701, 3010801, 3010901, 3011001, 3011101, 3011201, 3011301],
+    302: [3020101, 3020201, 3020301, 3020401, 3020501],
+    303: [3030101, 3030201, 3030301, 3030302, 3030303, 3030304, 3030401, 3030402, 3030403, 3030404, 3030501, 3030502, 3030503, 3030504, 3030505, 3030601, 3030602, 3030603, 3030701, 3030702, 3030703, 3030801, 3030802, 3030901, 3031001, 3031002],
+    304: [3040101, 3040201, 3040301, 3040401, 3040501],
+    305: [3050101, 3050201, 3050301, 3050302, 3050303, 3050401, 3050402, 3050501, 3050502],
+    306: [3060101, 3060201, 3060301, 3060302, 3060303, 3060304, 3060401, 3060402, 3060403, 3060404, 3060501, 3060502, 3060503, 3060504],
+    307: [3070101, 3070201, 3070301, 3070302],
+    308: [3080101, 3080102, 3080103],
+    309: [3090101, 3090201, 3090301, 3090302, 3090303, 3090401, 3090402, 3090403, 3090501, 3090502, 3090503, 3090504],
+    310: [3100101, 3100201, 3100301, 3100302, 3100303, 3100304, 3100305, 3100401, 3100402, 3100403, 3100404, 3100405, 3100501, 3100502, 3100503, 3100504],
+    311: [3110101, 3110201, 3110301, 3110302, 3110303, 3110304],
+    312: [3120101, 3120201, 3120301, 3120401, 3120402, 3120403, 3120404, 3120405, 3120501, 3120601],
+    313: [3130101, 3130201, 3130301, 3130401, 3130501],
+    401: [4010101, 4010102, 4010103, 4010104, 4010105, 4010201, 4010202, 4010203, 4010204, 4010205, 4010206, 4010207, 4010301, 4010302, 4010303, 4010304, 4010401, 4010402, 4010403, 4010404, 4010405, 4010406, 4010407, 4010408],
+    402: [4020101, 4020102, 4020103, 4020201, 4020202, 4020203, 4020301, 4020302, 4020303, 4020304, 4020305, 4020306, 4020307, 4020308, 4020309, 4020310, 4020311, 4020312, 4020313, 4020314, 4020315, 4020316, 4020317, 4020318, 4020319, 4020320, 4020321, 4020322, 4020323, 4020324, 4020325, 4020326, 4020327, 4020401, 4020402, 4020403, 4020501, 4020502, 4020503, 4020601, 4020602],
+    403: [4030101, 4030102, 4030103, 4030104, 4030105, 4030106, 4030107, 4030108, 4030201, 4030202, 4030203, 4030204, 4030205, 4030206, 4030207, 4030208, 4030209, 4030210, 4030211, 4030301, 4030302, 4030303, 4030304, 4030305, 4030306, 4030307, 4030308, 4030309, 4030401, 4030402, 4030403, 4030404],
+    501: [5010101, 5010102, 5010103, 5010104, 5010105, 5010106, 5010107, 5010108, 5010201, 5010202, 5010203, 5010204, 5010205, 5010206, 5010301, 5010302, 5010303, 5010304, 5010305, 5010306, 5010307, 5010308, 5010401, 5010402, 5010403, 5010404, 5010405, 5010406, 5010407, 5010501, 5010502, 5010503, 5010504, 5010505, 5010506, 5010601, 5010602, 5010603, 5010604, 5010605, 5010606, 5010607, 5010608],
+    502: [5020101, 5020102, 5020103, 5020104, 5020105, 5020106, 5020107, 5020108, 5020109, 5020110, 5020111, 5020112, 5020113, 5020114, 5020115, 5020201, 5020202, 5020203, 5020204, 5020205, 5020206, 5020207, 5020208, 5020209, 5020210, 5020211, 5020212, 5020301, 5020302, 5020303, 5020304, 5020305, 5020306],
+    503: [5030101, 5030102, 5030103, 5030104, 5030105, 5030106, 5030107, 5030108, 5030109, 5030110, 5030111, 5030112, 5030113, 5030114, 5030115, 5030116, 5030117, 5030118, 5030119, 5030120, 5030121, 5030122, 5030123, 5030124, 5030125, 5030201, 5030202, 5030203, 5030204, 5030205, 5030206, 5030207, 5030208, 5030209, 5030210, 5030211, 5030212, 5030213],
+    504: [5040101, 5040102, 5040103, 5040104, 5040105, 5040106, 5040107, 5040201, 5040202, 5040203, 5040204, 5040205, 5040206, 5040207, 5040208, 5040209, 5040210, 5040301, 5040302, 5040303, 5040304],
+    505: [5050101, 5050102, 5050103, 5050104, 5050105, 5050106, 5050107, 5050108, 5050109, 5050110, 5050111, 5050112, 5050113, 5050114, 5050115, 5050116],
+    506: [5060101, 5060102, 5060103, 5060104, 5060105, 5060106, 5060107, 5060201, 5060202, 5060203, 5060204, 5060301, 5060302, 5060303, 5060304, 5060401, 5060402, 5060403, 5060404, 5060405, 5060406, 5060501, 5060502, 5060503, 5060504, 5060505, 5060506, 5060507, 5060508, 5060509],
+    601: [6010101, 6010102, 6010103, 6010104, 6010105, 6010106, 6010107, 6010108, 6010109, 6010110, 6010111, 6010112, 6010113, 6010114, 6010201, 6010202, 6010203, 6010204, 6010301, 6010302, 6010303, 6010304, 6010305, 6010306, 6010401, 6010402, 6010403, 6010404, 6010501, 6010502, 6010503, 6010504, 6010505, 6010506, 6010507, 6010508, 6010509, 6010601, 6010602],
+    701: [7010101, 7010102, 7010103, 7010104, 7010105, 7010201, 7010202, 7010203, 7010204, 7010205, 7010206, 7010207, 7010301, 7010302, 7010303, 7010304, 7010305],
+    702: [7020101, 7020102, 7020103, 7020104, 7020105, 7020106],
+    703: [7030101, 7030102, 7030103, 7030104, 7030105, 7030106, 7030201, 7030202, 7030203, 7030204, 7030301, 7030302, 7030303, 7030304],
+    704: [7040101, 7040102, 7040103, 7040104, 7040105, 7040201, 7040202, 7040203, 7040204, 7040205],
+    705: [7050101, 7050102, 7050103, 7050201, 7050202, 7050301, 7050302],
+    706: [7060101],
+}
+
+def actividades_de_proceso(cod_proceso):
+    return PROCESO_A_ACTIVIDADES.get(cod_proceso, [])
+
+# --- Defaults de actividad para familias sin apertura (equitativo dentro del proceso) ---
+# GGI (proceso 504, 100% de sus 21 actividades, sin excluir ninguna)
+DEFAULT_ACTIVIDADES_GGI = {504: actividades_de_proceso(504)}
+
+# GGM: 2401-2409 -> proceso 505 (16 act.); 2410-2411 -> proceso 504 (21 act., completas)
+DEFAULT_ACTIVIDADES_GGM = {505: actividades_de_proceso(505), 504: actividades_de_proceso(504)}
+
+# OGG: 2501-2502 -> proceso 501 (43 act.); resto -> proceso 502 (33 act.)
+DEFAULT_ACTIVIDADES_OGG = {501: actividades_de_proceso(501), 502: actividades_de_proceso(502)}
+
+# GPA: cada tabla reparte equitativamente SOLO entre las actividades de su
+# propio subproceso (ej. GPA_1/6101 -> solo las 14 actividades de "Control
+# Directo de Riles", no las 39 de todo el proceso 601).
+def _acts_subproceso(prefijo5, catalogo_601):
+    return [a for a in catalogo_601 if str(a)[:5] == prefijo5]
+
+_acts_601 = actividades_de_proceso(601)
+DEFAULT_ACTIVIDADES_GPA = {
+    6101: _acts_subproceso("60101", _acts_601),
+    6201: _acts_subproceso("60102", _acts_601),
+    6301: _acts_subproceso("60103", _acts_601),
+    6401: _acts_subproceso("60104", _acts_601),
+    6501: _acts_subproceso("60105", _acts_601),
+    6601: _acts_subproceso("60106", _acts_601),
+}
+
+def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_raw,
+                    ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+                    gpa_files_raw):
+    """
+    Construye, desde las tablas fuente (NO desde REP_2/REP_3), dos
+    agregaciones con granularidad completa:
+
+    agg_serv[(cod_servicio_especifico, cod_recurso)] = [gasto_no_act, monto_act]
+        -> insumo para CYG_1, CYG_2, CYG_3, CYG_4 (agrupado por servicio
+           específico, ej. 1201 separado de 1202).
+
+    agg_act[(cod_actividad_especifica, cod_recurso)] = [gasto_no_act, monto_act]
+        -> insumo para CYG_8 (SOLO la porción de gasto regulada, familias 11/12).
+
+    Devuelve también 'avisos' con lo que falta o no se pudo determinar.
+    """
+    avisos = []
+    agg_serv = defaultdict(lambda: [0.0, 0.0])
+    agg_act = defaultdict(lambda: [0.0, 0.0])
+    REGULADOS = {1101, 1201, 1202, 1203, 1204, 1205}
+
+    def safe_rows(clave, etiqueta):
+        b = fb.get(clave)
+        if b is None:
+            avisos.append(f"CYG: falta **{etiqueta}** — esa familia queda excluida.")
+            return []
+        try:
+            return read_rows(b)
+        except Exception as e:
+            avisos.append(f"CYG: no se pudo leer **{etiqueta}** ({e}).")
+            return []
+
+    # ================= GRH =================
+    grh8 = safe_rows("grh8", "GRH_8")
+    grh11 = safe_rows("grh11", "GRH_11")
+    grh12 = safe_rows("grh12", "GRH_12")
+
+    shares_servicio_grh = defaultdict(list)  # (persona,cargo) -> [(servicio, pct), ...] TODOS los servicios
+    for r in grh11:
+        cod_reg, cod_noreg, pct = r[7], r[8], r[9]
+        cod = cod_reg if cod_reg != -1 else cod_noreg
+        shares_servicio_grh[(r[4], r[5])].append((cod, pct))
+
+    shares_proceso_grh = defaultdict(lambda: defaultdict(float))  # (persona,cargo) -> {actividad: pct}
+    # OJO: GRH_12 da % por ACTIVIDAD (no colapsado a proceso) -- se usa tal cual para CYG_8.
+    shares_actividad_grh = defaultdict(lambda: defaultdict(float))
+    for r in grh12:
+        persona, cargo, cod_actividad, pct_act = r[4], r[5], r[7], r[8]
+        shares_actividad_grh[(persona, cargo)][int(cod_actividad)] += pct_act
+
+    personas_sin_grh12 = set()
+    for r in grh8:
+        empresa, periodo, anio, sector, persona, cargo, cod_recurso, monto_anual, monto_act, pct_act, total_gasto = r
+        for cod_serv, pct_serv in shares_servicio_grh.get((persona, cargo), []):
+            gasto_serv = total_gasto * pct_serv
+            monto_act_serv = monto_act * pct_serv
+            agg_serv[(cod_serv, cod_recurso)][0] += gasto_serv
+            agg_serv[(cod_serv, cod_recurso)][1] += monto_act_serv
+            if cod_serv in REGULADOS:
+                actividades = shares_actividad_grh.get((persona, cargo))
+                if not actividades:
+                    personas_sin_grh12.add((persona, cargo))
+                    continue
+                for cod_actividad, pct_act_i in actividades.items():
+                    agg_act[(cod_actividad, cod_recurso)][0] += gasto_serv * pct_act_i
+                    agg_act[(cod_actividad, cod_recurso)][1] += monto_act_serv * pct_act_i
+    if personas_sin_grh12:
+        avisos.append(f"CYG_8-GRH: {len(personas_sin_grh12)} persona(s) reguladas sin apertura en GRH_12.")
+
+    # ================= GCP =================
+    gcp5 = safe_rows("gcp5", "GCP_5")
+    gcp6 = safe_rows("gcp6", "GCP_6")
+
+    shares_actividad_gcp = defaultdict(lambda: defaultdict(float))  # (persona,cargo,recurso) -> {actividad: pct}
+    for r in gcp6:
+        persona, cargo, cod_recurso_g6, cod_actividad, pct = r[4], r[5], r[6], r[8], r[9]
+        shares_actividad_gcp[(persona, cargo, cod_recurso_g6)][int(cod_actividad)] += pct
+
+    faltan_gcp6 = 0
+    for r in gcp5:
+        empresa, periodo, anio, sector, persona, cargo, cod_recurso, gasto_no_act, cod_reg, cod_noreg, pct = r
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        agg_serv[(cod_serv, cod_recurso)][0] += gasto_no_act
+        # GCP_5 no trae desglose de monto activado por servicio -> se deja en 0 aquí
+        if cod_reg in REGULADOS:
+            actividades = shares_actividad_gcp.get((persona, cargo, cod_recurso))
+            if not actividades:
+                faltan_gcp6 += 1
+                continue
+            for cod_actividad, pct_a in actividades.items():
+                agg_act[(cod_actividad, cod_recurso)][0] += gasto_no_act * pct_a
+    if faltan_gcp6:
+        avisos.append(f"CYG_8-GCP: {faltan_gcp6} combinación(es) reguladas sin apertura en GCP_6.")
+
+    # ================= GGV =================
+    ggv4 = safe_rows("ggv4", "GGV_4")
+    ggv5 = safe_rows("ggv5", "GGV_5")
+    ggv6 = safe_rows("ggv6", "GGV_6")
+
+    shares_servicio_ggv = defaultdict(list)
+    for r in ggv5:
+        empresa, periodo, anio, sector, id_activo, total_no_act, cod_reg, cod_noreg, pct = r[:9]
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        shares_servicio_ggv[id_activo].append((cod_serv, pct))
+
+    shares_actividad_ggv = defaultdict(lambda: defaultdict(float))
+    for r in ggv6:
+        id_activo, cod_actividad, pct = r[4], r[6], r[7]
+        shares_actividad_ggv[id_activo][int(cod_actividad)] += pct
+
+    activos_sin_ggv6 = set()
+    for r in ggv4:
+        empresa, periodo, anio, sector, id_activo, cod_recurso, monto_anual, monto_act, pct_act, total_gasto = r[:10]
+        for cod_serv, pct_serv in shares_servicio_ggv.get(id_activo, []):
+            gasto_serv = total_gasto * pct_serv
+            monto_act_serv = monto_act * pct_serv
+            agg_serv[(cod_serv, cod_recurso)][0] += gasto_serv
+            agg_serv[(cod_serv, cod_recurso)][1] += monto_act_serv
+            if cod_serv in REGULADOS:
+                actividades = shares_actividad_ggv.get(id_activo)
+                if not actividades:
+                    activos_sin_ggv6.add(id_activo)
+                    continue
+                for cod_actividad, pct_a in actividades.items():
+                    agg_act[(cod_actividad, cod_recurso)][0] += gasto_serv * pct_a
+                    agg_act[(cod_actividad, cod_recurso)][1] += monto_act_serv * pct_a
+    if activos_sin_ggv6:
+        avisos.append(f"CYG_8-GGV: {len(activos_sin_ggv6)} activo(s) regulados sin apertura en GGV_6.")
+
+    # ================= GGI =================
+    ggi5 = safe_rows("ggi5", "GGI_5")
+    ggi6 = safe_rows("ggi6", "GGI_6")
+
+    shares_proceso_ggi = defaultdict(lambda: defaultdict(float))
+    for r in ggi6:
+        id_inmueble, cod_proceso_directo, pct = r[4], r[6], r[7]
+        shares_proceso_ggi[id_inmueble][cod_proceso_directo] += pct
+
+    for r in ggi5:
+        empresa, periodo, anio, sector, id_inmueble, cod_recurso, gasto_no_act, cod_reg, cod_noreg, pct = r[:10]
+        cod_serv = cod_reg if cod_reg != -1 else cod_noreg
+        agg_serv[(cod_serv, cod_recurso)][0] += gasto_no_act
+        if cod_reg in REGULADOS:
+            # GGI no tiene tabla de actividad -> reparto equitativo por defecto
+            # entre las actividades del proceso 504 (parametrizable)
+            overrides = DEFAULT_ACTIVIDADES_GGI  # {proceso: [actividades]}; sin parametrización propia aún
+            actividades_504 = overrides.get(504, [])
+            if actividades_504:
+                pct_igual = 1.0 / len(actividades_504)
+                for cod_actividad in actividades_504:
+                    agg_act[(cod_actividad, cod_recurso)][0] += gasto_no_act * pct_igual
+
+    # ================= GGM =================
+    ggm_tablas = [safe_rows(f"ggm{i}", f"GGM_{i}") for i in range(1, 6)]
+    ggm_regulado_por_recurso = defaultdict(lambda: [0.0, 0.0])  # [gasto_no_act, monto_act]
+    for tabla in ggm_tablas:
+        for r in tabla:
+            cod_recurso, monto_act, total_gasto = r[4], r[-3], r[-1]
+            overrides = ggm_params.get(cod_recurso, [])
+            pct_reg = 1.0 - sum(p for _, p in overrides)
+            agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
+            agg_serv[(1101, cod_recurso)][1] += monto_act * pct_reg
+            for cod_serv_over, pct_o in overrides:
+                agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
+                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+            ggm_regulado_por_recurso[cod_recurso][0] += total_gasto * pct_reg
+            ggm_regulado_por_recurso[cod_recurso][1] += monto_act * pct_reg
+
+    def _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, defaults_map):
+        if gasto_g == 0 and gasto_a == 0:
+            return
+        if overrides_proceso:
+            pct_default = 1.0 - sum(p for _, p in overrides_proceso)
+            acts_default = defaults_map.get(proceso_default) or actividades_de_proceso(proceso_default)
+            if acts_default:
+                pct_igual = pct_default / len(acts_default)
+                for a in acts_default:
+                    agg_act[(a, cod_recurso)][0] += gasto_g * pct_igual
+                    agg_act[(a, cod_recurso)][1] += gasto_a * pct_igual
+            for proc_ov, pct_ov in overrides_proceso:
+                acts_ov = actividades_de_proceso(proc_ov)
+                if acts_ov:
+                    pct_igual_ov = pct_ov / len(acts_ov)
+                    for a in acts_ov:
+                        agg_act[(a, cod_recurso)][0] += gasto_g * pct_igual_ov
+                        agg_act[(a, cod_recurso)][1] += gasto_a * pct_igual_ov
+        else:
+            acts_default = defaults_map.get(proceso_default) or actividades_de_proceso(proceso_default)
+            if acts_default:
+                pct_igual = 1.0 / len(acts_default)
+                for a in acts_default:
+                    agg_act[(a, cod_recurso)][0] += gasto_g * pct_igual
+                    agg_act[(a, cod_recurso)][1] += gasto_a * pct_igual
+
+    for cod_recurso, (gasto_g, gasto_a) in ggm_regulado_por_recurso.items():
+        proceso_default = DEFAULT_PROCESO_GGM.get(cod_recurso, 504)
+        overrides_proceso = ggm_proceso_params.get(cod_recurso)
+        _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, DEFAULT_ACTIVIDADES_GGM)
+
+    # ================= OGG =================
+    ogg5 = safe_rows("ogg5", "OGG_5")
+    ogg_regulado_por_recurso = defaultdict(lambda: [0.0, 0.0])
+    for r in ogg5:
+        cod_recurso, monto_act, total_gasto = r[4], r[9], r[11]
+        overrides = ogg_params.get(cod_recurso, [])
+        pct_reg = 1.0 - sum(p for _, p in overrides)
+        agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
+        agg_serv[(1101, cod_recurso)][1] += monto_act * pct_reg
+        for cod_serv_over, pct_o in overrides:
+            agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
+            agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+        ogg_regulado_por_recurso[cod_recurso][0] += total_gasto * pct_reg
+        ogg_regulado_por_recurso[cod_recurso][1] += monto_act * pct_reg
+
+    for cod_recurso, (gasto_g, gasto_a) in ogg_regulado_por_recurso.items():
+        proceso_default = DEFAULT_PROCESO_OGG.get(cod_recurso, DEFAULT_PROCESO_OGG_FALLBACK)
+        overrides_proceso = ogg_proceso_params.get(cod_recurso)
+        _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, DEFAULT_ACTIVIDADES_OGG)
+
+    # ================= MEI =================
+    mei1 = safe_rows("mei1", "MEI_1")
+    mei2 = safe_rows("mei2", "MEI_2")
+    mei3 = safe_rows("mei3", "MEI_3")
+    mei4 = safe_rows("mei4", "MEI_4")
+
+    # --- MEI_1: mapeo EXACTO vía CÓDIGO OBRA TIPO NBI (no estimación) ---
+    obras_no_mapeadas = set()
+    for r in mei1:
+        cod_recurso, cod_obra_nbi, monto_act, total_gasto = r[6], r[5], r[20], r[22]
+        overrides = mei_params.get(cod_recurso, [])
+        pct_reg = 1.0 - sum(p for _, p in overrides)
+        gasto_reg = total_gasto * pct_reg
+        act_reg = monto_act * pct_reg
+        agg_serv[(1101, cod_recurso)][0] += gasto_reg
+        agg_serv[(1101, cod_recurso)][1] += act_reg
+        for cod_serv_over, pct_o in overrides:
+            agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
+            agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+        if gasto_reg == 0 and act_reg == 0:
+            continue
+        cod_actividad = OBRA_NBI_A_ACTIVIDAD.get(cod_obra_nbi)
+        if cod_actividad is None:
+            obras_no_mapeadas.add(cod_obra_nbi)
+            continue
+        agg_act[(cod_actividad, cod_recurso)][0] += gasto_reg
+        agg_act[(cod_actividad, cod_recurso)][1] += act_reg
+    if obras_no_mapeadas:
+        avisos.append(f"CYG_8-MEI_1: código(s) OBRA TIPO NBI sin mapeo conocido: {sorted(obras_no_mapeadas)}.")
+
+    def procesar_mei_con_actividad(tabla, idx_recurso, idx_gasto, idx_activado, idx_actividad):
+        for r in tabla:
+            cod_recurso, total_gasto, monto_act, cod_actividad = r[idx_recurso], r[idx_gasto], r[idx_activado], r[idx_actividad]
+            if cod_actividad is None:
+                continue
+            overrides = mei_params.get(cod_recurso, [])
+            pct_reg = 1.0 - sum(p for _, p in overrides)
+            gasto_reg = total_gasto * pct_reg
+            act_reg = monto_act * pct_reg
+            agg_serv[(1101, cod_recurso)][0] += gasto_reg
+            agg_serv[(1101, cod_recurso)][1] += act_reg
+            for cod_serv_over, pct_o in overrides:
+                agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
+                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+            if gasto_reg == 0 and act_reg == 0:
+                continue
+            agg_act[(int(cod_actividad), cod_recurso)][0] += gasto_reg
+            agg_act[(int(cod_actividad), cod_recurso)][1] += act_reg
+
+    procesar_mei_con_actividad(mei2, 4, 16, 17, 21)
+    procesar_mei_con_actividad(mei3, 4, 19, 17, 9)
+    procesar_mei_con_actividad(mei4, 4, 16, 14, 6)
+
+    # ================= ST =================
+    tablas_st_faltantes = [t for t in ST_TABLES if t not in st_files_raw]
+    if tablas_st_faltantes and st_files_raw:
+        avisos.append(f"CYG: faltan {len(tablas_st_faltantes)} tabla(s) ST: {', '.join(tablas_st_faltantes)}.")
+    for nombre_tabla, file_bytes in st_files_raw.items():
+        try:
+            filas_st, avisos_tabla = leer_tabla_actividad_st(file_bytes)
+        except Exception as e:
+            avisos.append(f"CYG-ST: no se pudo leer {nombre_tabla} ({e}).")
+            continue
+        for a in avisos_tabla:
+            avisos.append(f"CYG-ST {nombre_tabla}: {a}")
+        for cod_recurso, monto_act, total_gasto, cod_actividad in filas_st:
+            overrides = st_params.get(cod_recurso, [])
+            pct_reg = 1.0 - sum(p for _, p in overrides)
+            gasto_reg = total_gasto * pct_reg
+            act_reg = monto_act * pct_reg
+            agg_serv[(1101, cod_recurso)][0] += gasto_reg
+            agg_serv[(1101, cod_recurso)][1] += act_reg
+            for cod_serv_over, pct_o in overrides:
+                agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
+                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+            if gasto_reg == 0 and act_reg == 0:
+                continue
+            agg_act[(cod_actividad, cod_recurso)][0] += gasto_reg
+            agg_act[(cod_actividad, cod_recurso)][1] += act_reg
+
+    # ================= GPA =================
+    tablas_gpa_faltantes = [t for t in GPA_TABLES if t not in gpa_files_raw]
+    if tablas_gpa_faltantes and gpa_files_raw:
+        avisos.append(f"CYG-GPA: faltan {len(tablas_gpa_faltantes)} tabla(s): {', '.join(tablas_gpa_faltantes)}.")
+    for nombre_tabla, file_bytes in gpa_files_raw.items():
+        servicio_fijo = GPA_TABLE_TO_SERVICIO.get(nombre_tabla)
+        if servicio_fijo is None:
+            continue
+        try:
+            filas_gpa = leer_tabla_st(file_bytes)
+        except Exception as e:
+            avisos.append(f"CYG-GPA: no se pudo leer {nombre_tabla} ({e}).")
+            continue
+        gpa_por_recurso = defaultdict(lambda: [0.0, 0.0])
+        for cod_recurso, monto_act, total_gasto in filas_gpa:
+            agg_serv[(servicio_fijo, cod_recurso)][0] += total_gasto
+            agg_serv[(servicio_fijo, cod_recurso)][1] += monto_act
+            gpa_por_recurso[cod_recurso][0] += total_gasto
+            gpa_por_recurso[cod_recurso][1] += monto_act
+        for cod_recurso, (gasto_g, gasto_a) in gpa_por_recurso.items():
+            overrides_proceso = gpa_proceso_params.get(cod_recurso)
+            acts_default_map = {DEFAULT_PROCESO_GPA: DEFAULT_ACTIVIDADES_GPA.get(cod_recurso, [])}
+            _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, DEFAULT_PROCESO_GPA, overrides_proceso, acts_default_map)
+
+    EMPRESA = PERIODO = ANIO = SECTOR = None
+    for clave in ["grh8", "gcp5", "ggv4", "ggi5", "ggm1", "ogg5"]:
+        b = fb.get(clave)
+        if b:
+            filas_tmp = read_rows(b)
+            if filas_tmp:
+                EMPRESA, PERIODO, ANIO, SECTOR = filas_tmp[0][0], filas_tmp[0][1], filas_tmp[0][2], filas_tmp[0][3]
+                break
+
+    return agg_serv, agg_act, avisos, (EMPRESA, PERIODO, ANIO, SECTOR)
+
+def _normalizar_por_clave(items_por_clave, decimales=4):
+    """items_por_clave: {clave_agrupadora: [(sub_clave, gasto), ...]}
+    Devuelve {clave_agrupadora: [(sub_clave, pct, gasto), ...]} con pct
+    sumando EXACTAMENTE 1.0 dentro de cada clave_agrupadora (método de mayor
+    residuo)."""
+    resultado = {}
+    for clave, items in items_por_clave.items():
+        total = sum(g for _, g in items)
+        if total == 0:
+            continue
+        fracciones = [g / total for _, g in items]
+        pcts = redondear_para_sumar_100(fracciones, decimales)
+        resultado[clave] = [(sub, pct, g) for (sub, g), pct in zip(items, pcts)]
+    return resultado
+
+
+def build_cyg_1_a_4(agg_serv, empresa_periodo_anio_sector):
+    """Arma CYG_1 (1101,1102), CYG_2 (1201-1205), CYG_3 (2101-2117),
+    CYG_4 (2201-2214). Normaliza % por SERVICIO ESPECÍFICO (no por recurso)."""
+    EMPRESA, PERIODO, ANIO, SECTOR = empresa_periodo_anio_sector
+    rangos = {
+        "CYG_1": set([1101, 1102]),
+        "CYG_2": set([1201, 1202, 1203, 1204, 1205]),
+        "CYG_3": set(range(2101, 2118)),
+        "CYG_4": set(range(2201, 2215)),
+    }
+    resultados = {}
+    for nombre_tabla, servicios_validos in rangos.items():
+        # separar no-activado y activado (normalización independiente, igual que REP_2)
+        items_no_act = defaultdict(list)  # servicio -> [(recurso, gasto), ...]
+        items_act = defaultdict(list)
+        for (cod_serv, cod_recurso), (g, a) in agg_serv.items():
+            if cod_serv not in servicios_validos:
+                continue
+            if abs(g) > 1e-9:
+                items_no_act[cod_serv].append((cod_recurso, g))
+            if abs(a) > 1e-9:
+                items_act[cod_serv].append((cod_recurso, a))
+
+        norm_no_act = _normalizar_por_clave(items_no_act)
+        norm_act = _normalizar_por_clave(items_act)
+
+        filas = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])  # (servicio,recurso) -> [pct_no_act,monto_no_act,pct_act,monto_act]
+        for servicio, lista in norm_no_act.items():
+            for recurso, pct, g in lista:
+                filas[(servicio, recurso)][0] = pct
+                filas[(servicio, recurso)][1] = round(g, 2)
+        for servicio, lista in norm_act.items():
+            for recurso, pct, a in lista:
+                filas[(servicio, recurso)][2] = pct
+                filas[(servicio, recurso)][3] = round(a, 2)
+
+        final_rows = []
+        for (servicio, recurso), (pct_na, monto_na, pct_a, monto_a) in sorted(filas.items()):
+            if monto_na == 0 and monto_a == 0:
+                continue
+            final_rows.append([EMPRESA, PERIODO, ANIO, SECTOR, servicio, recurso,
+                                round(pct_na * 100, 2), monto_na, round(pct_a * 100, 2), monto_a])
+        resultados[nombre_tabla] = final_rows
+    return resultados
+
+
+def build_cyg_8(agg_act, empresa_periodo_anio_sector):
+    """CYG_8: (actividad, recurso, %no_act, monto_no_act, %act, monto_act).
+    Normaliza % por RECURSO (sin distinguir familia de servicio)."""
+    EMPRESA, PERIODO, ANIO, SECTOR = empresa_periodo_anio_sector
+
+    items_no_act = defaultdict(list)  # recurso -> [(actividad, gasto), ...]
+    items_act = defaultdict(list)
+    for (cod_actividad, cod_recurso), (g, a) in agg_act.items():
+        if abs(g) > 1e-9:
+            items_no_act[cod_recurso].append((cod_actividad, g))
+        if abs(a) > 1e-9:
+            items_act[cod_recurso].append((cod_actividad, a))
+
+    norm_no_act = _normalizar_por_clave(items_no_act)
+    norm_act = _normalizar_por_clave(items_act)
+
+    filas = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])  # (actividad,recurso) -> [pct_no_act,monto_no_act,pct_act,monto_act]
+    for recurso, lista in norm_no_act.items():
+        for actividad, pct, g in lista:
+            filas[(actividad, recurso)][0] = pct
+            filas[(actividad, recurso)][1] = round(g, 2)
+    for recurso, lista in norm_act.items():
+        for actividad, pct, a in lista:
+            filas[(actividad, recurso)][2] = pct
+            filas[(actividad, recurso)][3] = round(a, 2)
+
+    final_rows = []
+    for (actividad, recurso), (pct_na, monto_na, pct_a, monto_a) in sorted(filas.items()):
+        if monto_na == 0 and monto_a == 0:
+            continue
+        final_rows.append([EMPRESA, PERIODO, ANIO, SECTOR, actividad, recurso,
+                            round(pct_na * 100, 2), monto_na, round(pct_a * 100, 2), monto_a])
+    return final_rows
+
+
+PATRON_RUT_CHILENO = re.compile(r"^\d{6,9}-[0-9kK]$")
+
+
+def es_rut_valido(id_cliente):
+    """True si id_cliente tiene formato de RUT chileno válido (ej.
+    '12345678-9' o '12345678-K'). Se usa para filtrar, en ING_4, las filas
+    que corresponden a clientes reales (excluyendo provisiones, notas
+    contables, referencias de facturación u otros textos que no son RUT)."""
+    if id_cliente is None:
+        return False
+    return bool(PATRON_RUT_CHILENO.match(str(id_cliente).strip()))
+
+
+def build_cyg_9(agg_serv, mco42_bytes, ing4_bytes, empresa_periodo_anio_sector):
+    """CYG_9: abre servicios NO regulados (21xx, 22xx) por ID CLIENTE, usando
+    MCO_42 (servicio -> id_ingreso) e ING_4 (id_ingreso -> id_cliente + monto
+    anual de ingreso) para repartir proporcionalmente al ingreso de cada
+    cliente. Solo se consideran clientes con ID CLIENTE en formato RUT
+    chileno válido (ej. '12345678-9' o '12345678-K'); las demás filas de
+    ING_4 (provisiones, notas contables, referencias de facturación, etc.)
+    se EXCLUYEN del cálculo de proporción y se reportan en 'avisos' para que
+    se corrijan en el origen. Si un servicio no está cubierto por MCO_42/
+    ING_4 (o solo tiene entradas no-RUT), se declara con ID CLIENTE = '-1'
+    (100%), según lo dispuesto en el diccionario SISS."""
+    EMPRESA, PERIODO, ANIO, SECTOR = empresa_periodo_anio_sector
+    avisos = []
+
+    if mco42_bytes is None or ing4_bytes is None:
+        avisos.append("CYG_9: falta MCO_42 y/o ING_4 — todos los clientes se declaran como '-1'.")
+        mco = []
+        ing = []
+    else:
+        mco = read_rows(mco42_bytes)
+        ing = read_rows(ing4_bytes)
+
+    servicio_a_ingreso = {r[4]: r[5] for r in mco}
+    clientes_por_ingreso = defaultdict(list)
+    no_rut_encontrados = []  # (id_ingreso, id_cliente, monto) para el aviso
+    for r in ing:
+        id_ingreso, id_cliente, monto = r[5], r[6], r[9]
+        if es_rut_valido(id_cliente):
+            clientes_por_ingreso[id_ingreso].append((id_cliente, monto))
+        else:
+            no_rut_encontrados.append((id_ingreso, id_cliente, monto))
+
+    if no_rut_encontrados:
+        monto_excluido = sum(m for _, _, m in no_rut_encontrados)
+        ejemplos = ", ".join(f"'{c}'" for _, c, _ in no_rut_encontrados[:5])
+        avisos.append(
+            f"CYG_9: se excluyeron {len(no_rut_encontrados)} fila(s) de ING_4 con ID CLIENTE "
+            f"sin formato RUT válido (monto total excluido de la base de reparto: "
+            f"{monto_excluido:,.0f}). Revisar y corregir en el origen. Ejemplos: {ejemplos}"
+            + (", ..." if len(no_rut_encontrados) > 5 else "") + "."
+        )
+
+    servicios_no_reg = set(range(2101, 2118)) | set(range(2201, 2215))
+
+    filas = []
+    for (cod_serv, cod_recurso), (g, a) in agg_serv.items():
+        if cod_serv not in servicios_no_reg:
+            continue
+        if g == 0 and a == 0:
+            continue
+
+        id_ingreso = servicio_a_ingreso.get(cod_serv)
+        clientes = clientes_por_ingreso.get(id_ingreso) if id_ingreso is not None else None
+
+        if not clientes:
+            # sin cobertura MCO_42/ING_4 -> 100% a ID CLIENTE "-1"
+            filas.append([cod_serv, cod_recurso, "-1", g, a])
+            continue
+
+        total_ingreso = sum(c[1] for c in clientes)
+        if total_ingreso == 0:
+            filas.append([cod_serv, cod_recurso, "-1", g, a])
+            continue
+
+        # Reparto proporcional SIN redondear aún (el redondeo final, con piso
+        # mínimo, se aplica una sola vez más abajo al consolidar por recurso;
+        # redondear aquí prematuramente a 4 decimales podía dejar en 0.0000 —
+        # y por lo tanto eliminar— a clientes muy pequeños relativos al total
+        # de ingreso, antes de que el piso mínimo alcanzara a rescatarlos).
+        for id_cliente, monto in clientes:
+            pct_cliente = monto / total_ingreso
+            filas.append([cod_serv, cod_recurso, id_cliente, g * pct_cliente, a * pct_cliente])
+
+    # Consolidar filas duplicadas (mismo servicio,recurso,cliente pudiera repetirse si
+    # el mismo cliente aparece en más de un ID INGRESO -- no debería, pero por robustez)
+    consolidado = defaultdict(lambda: [0.0, 0.0])
+    for cod_serv, cod_recurso, id_cliente, g, a in filas:
+        consolidado[(cod_serv, cod_recurso, id_cliente)][0] += g
+        consolidado[(cod_serv, cod_recurso, id_cliente)][1] += a
+
+    # Normalizar % por RECURSO (no por servicio+recurso): el % representa la
+    # porción del RECURSO asignada a cada cliente, combinando todos los
+    # servicios no regulados que usan ese recurso.
+    items_no_act = defaultdict(list)
+    items_act = defaultdict(list)
+    for (cod_serv, cod_recurso, id_cliente), (g, a) in consolidado.items():
+        if abs(g) > 1e-9:
+            items_no_act[cod_recurso].append(((cod_serv, id_cliente), g))
+        if abs(a) > 1e-9:
+            items_act[cod_recurso].append(((cod_serv, id_cliente), a))
+
+    norm_no_act, fusion_no_act = normalizar_con_piso_minimo(items_no_act, piso=0.0001)
+    norm_act, fusion_act = normalizar_con_piso_minimo(items_act, piso=0.0001)
+
+    recursos_fusionados = {rec for rec, f in fusion_no_act.items() if f} | {rec for rec, f in fusion_act.items() if f}
+    if recursos_fusionados:
+        avisos.append(
+            f"CYG_9: {len(recursos_fusionados)} recurso(s) con demasiados clientes para "
+            f"que todos alcancen el piso mínimo de 0,01% individualmente; los clientes de "
+            f"menor monto se agruparon bajo ID CLIENTE '-1'. Recursos afectados: "
+            f"{sorted(recursos_fusionados)}."
+        )
+
+    filas_finales = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
+    for cod_recurso, lista in norm_no_act.items():
+        for (cod_serv, id_cliente), pct, g in lista:
+            filas_finales[(cod_serv, cod_recurso, id_cliente)][0] = pct
+            filas_finales[(cod_serv, cod_recurso, id_cliente)][1] = round(g, 2)
+    for cod_recurso, lista in norm_act.items():
+        for (cod_serv, id_cliente), pct, a in lista:
+            filas_finales[(cod_serv, cod_recurso, id_cliente)][2] = pct
+            filas_finales[(cod_serv, cod_recurso, id_cliente)][3] = round(a, 2)
+
+    final_rows = []
+    for (cod_serv, cod_recurso, id_cliente), (pct_na, monto_na, pct_a, monto_a) in sorted(
+            filas_finales.items(), key=lambda x: (x[0][0], x[0][1], str(x[0][2]))):
+        if monto_na == 0 and monto_a == 0:
+            continue
+        final_rows.append([EMPRESA, PERIODO, ANIO, SECTOR, id_cliente, cod_serv, cod_recurso,
+                            round(pct_na * 100, 2), monto_na, round(pct_a * 100, 2), monto_a])
+
+    return final_rows, avisos
 
 
 # ---------------------------------------------------------------- UI --------
@@ -1774,8 +2601,8 @@ if run:
     st.subheader("Detalle REP_2")
     st.dataframe(
         df.style.format({
-            "% NO ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2%}",
-            "% ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2%}",
+            "% NO ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
+            "% ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
             "GASTO ANUAL": "{:,.0f}",
             "MONTO ACTIVADO": "{:,.0f}",
         }),
@@ -2151,7 +2978,7 @@ def build_excel_rep3(final_rows3):
             cell.font = data_font
             cell.border = border
             if c == 8:
-                cell.number_format = "0.00%"
+                cell.number_format = "0.00"
             elif c == 9:
                 cell.number_format = '#,##0;(#,##0);"-"'
             else:
@@ -2342,7 +3169,7 @@ if run_rep3:
 
         df3 = pd.DataFrame(final_rows3, columns=HEADERS_REP3)
         st.dataframe(
-            df3.style.format({"% ASIGNADO PROCESO": "{:.2%}", "GASTO ANUAL": "{:,.0f}"}),
+            df3.style.format({"% ASIGNADO PROCESO": "{:.2f}%", "GASTO ANUAL": "{:,.0f}"}),
             use_container_width=True,
         )
 
@@ -2353,3 +3180,199 @@ if run_rep3:
             file_name="REP_3.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+# ============================================================================
+# GENERADOR CYG - Costos y Gastos por Recurso (CYG_1-4, CYG_8, CYG_9)
+# ============================================================================
+st.divider()
+st.header("📊 Generar tablas CYG")
+st.caption(
+    "Las tablas CYG (Costos y Gastos por Recurso) se construyen SIEMPRE desde "
+    "las tablas fuente (no desde REP_2/REP_3, que ya colapsan el servicio "
+    "específico y la actividad específica en familia/proceso). REP_2 y REP_3 "
+    "se usan aquí solo como checkpoint de validación de cuadratura."
+)
+st.caption(
+    "CYG_1: servicios 1101/1102 · CYG_2: servicios 1201-1205 · "
+    "CYG_3: servicios no regulados 2101-2117 · CYG_4: servicios no regulados "
+    "2201-2214 · CYG_8: apertura por actividad (solo gasto regulado) · "
+    "CYG_9: servicios no regulados abiertos por ID Cliente (vía MCO_42 + ING_4)."
+)
+
+HEADERS_CYG_SERV = [
+    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+    "CÓDIGO SERVICIO", "CÓDIGO RECURSO",
+    "% NO ACTIVADO ASIGNADO", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO", "MONTO ACTIVADO",
+]
+HEADERS_CYG_8 = [
+    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+    "CÓDIGO ACTIVIDAD", "CÓDIGO RECURSO",
+    "% NO ACTIVADO ASIGNADO ACTIVIDAD", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO ACTIVIDAD", "MONTO ACTIVADO",
+]
+HEADERS_CYG_9 = [
+    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+    "ID CLIENTE", "CÓDIGO SERVICIO NO REGULADO", "CÓDIGO RECURSO",
+    "% NO ACTIVADO ASIGNADO A CLIENTE", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO A CLIENTE", "MONTO ACTIVADO",
+]
+
+
+def _agregar_hoja_cyg(wb, nombre_hoja, headers, filas, pct_cols, monto_cols):
+    ws = wb.create_sheet(nombre_hoja)
+    header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    data_font = Font(name="Arial", size=10)
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+    ws.row_dimensions[1].height = 30
+
+    for row in filas:
+        ws.append(row)
+
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, len(headers) + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.font = data_font
+            cell.border = border
+            if c in pct_cols:
+                cell.number_format = "0.00"
+            elif c in monto_cols:
+                cell.number_format = '#,##0;(#,##0);"-"'
+            else:
+                cell.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    for nombre in ["CYG_1", "CYG_2", "CYG_3", "CYG_4"]:
+        ws = _agregar_hoja_cyg(wb, nombre, HEADERS_CYG_SERV, cyg14[nombre], pct_cols={7, 9}, monto_cols={8, 10})
+        widths = [14, 16, 14, 20, 14, 14, 16, 18, 16, 18]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws8 = _agregar_hoja_cyg(wb, "CYG_8", HEADERS_CYG_8, cyg8, pct_cols={7, 9}, monto_cols={8, 10})
+    widths8 = [14, 16, 14, 20, 14, 14, 20, 18, 20, 18]
+    for i, w in enumerate(widths8, start=1):
+        ws8.column_dimensions[get_column_letter(i)].width = w
+
+    ws9 = _agregar_hoja_cyg(wb, "CYG_9", HEADERS_CYG_9, cyg9, pct_cols={8, 10}, monto_cols={9, 11})
+    widths9 = [14, 16, 14, 20, 16, 20, 14, 18, 18, 18, 18]
+    for i, w in enumerate(widths9, start=1):
+        ws9.column_dimensions[get_column_letter(i)].width = w
+
+    if avisos_cyg:
+        wsa = wb.create_sheet("Avisos_CYG")
+        wsa.append(["Aviso"])
+        cell = wsa.cell(row=1, column=1)
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        cell.fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+        for a in avisos_cyg:
+            wsa.append([a.replace("**", "")])
+        for r in range(2, wsa.max_row + 1):
+            c = wsa.cell(row=r, column=1)
+            c.font = Font(name="Arial", size=10)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+        wsa.column_dimensions["A"].width = 110
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+with st.expander("📂 Archivos adicionales para CYG_9 (MCO_42 + ING_4)", expanded=False):
+    st.caption(
+        "MCO_42 asigna cada servicio no regulado a un ID Ingreso. ING_4 abre "
+        "cada ID Ingreso en ID Cliente + monto anual de ingreso. El gasto se "
+        "reparte entre clientes proporcionalmente a su ingreso. Si un servicio "
+        "no está cubierto, se declara con ID CLIENTE = '-1' (100%)."
+    )
+    f_mco42 = st.file_uploader("MCO_42.xlsx", type="xlsx", key="mco42")
+    f_ing4 = st.file_uploader("ING_4.xlsx", type="xlsx", key="ing4")
+
+run_cyg = st.button("Generar tablas CYG", type="primary")
+
+if run_cyg:
+    fb_cyg = {
+        "grh8": f_grh8.getvalue() if f_grh8 else None,
+        "grh11": f_grh11.getvalue() if f_grh11 else None,
+        "grh12": f_grh12.getvalue() if f_grh12 else None,
+        "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
+        "gcp6": f_gcp6.getvalue() if f_gcp6 else None,
+        "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
+        "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
+        "ggv6": f_ggv6.getvalue() if f_ggv6 else None,
+        "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
+        "ggi6": f_ggi6.getvalue() if f_ggi6 else None,
+        "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
+        "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
+        "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
+        "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
+        "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
+        "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
+        "mei1": f_mei1.getvalue() if f_mei1 else None,
+        "mei2": f_mei2.getvalue() if f_mei2 else None,
+        "mei3": f_mei3.getvalue() if f_mei3 else None,
+        "mei4": f_mei4.getvalue() if f_mei4 else None,
+    }
+    st_files_raw_cyg = {}
+    for f in (f_st_files or []):
+        tabla = identificar_tabla_st(f.name)
+        if tabla:
+            st_files_raw_cyg[tabla] = f.getvalue()
+    gpa_files_raw_cyg = {}
+    for f in (f_gpa_files_rep3 or []):
+        tabla = identificar_tabla_gpa(f.name)
+        if tabla:
+            gpa_files_raw_cyg[tabla] = f.getvalue()
+
+    try:
+        agg_serv, agg_act, avisos_cyg, epas = build_cyg_core(
+            fb_cyg, ggm_params, ogg_params, mei_params, st_params, st_files_raw_cyg,
+            ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+            gpa_files_raw_cyg,
+        )
+    except Exception as e:
+        st.error(f"Error generando CYG: {e}")
+        st.stop()
+
+    cyg14 = build_cyg_1_a_4(agg_serv, epas)
+    cyg8 = build_cyg_8(agg_act, epas)
+    cyg9, avisos9 = build_cyg_9(
+        agg_serv,
+        f_mco42.getvalue() if f_mco42 else None,
+        f_ing4.getvalue() if f_ing4 else None,
+        epas,
+    )
+    avisos_cyg = avisos_cyg + avisos9
+
+    total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
+    st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
+    for nombre, filas in cyg14.items():
+        st.write(f"**{nombre}**: {len(filas)} filas")
+    st.write(f"**CYG_8**: {len(cyg8)} filas")
+    st.write(f"**CYG_9**: {len(cyg9)} filas")
+
+    if avisos_cyg:
+        with st.expander(f"⚠️ Avisos CYG ({len(avisos_cyg)})", expanded=True):
+            for a in avisos_cyg:
+                st.markdown(f"- {a}")
+
+    excel_cyg = build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg)
+    st.download_button(
+        "Descargar CYG.xlsx",
+        data=excel_cyg,
+        file_name="CYG.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
