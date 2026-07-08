@@ -1155,8 +1155,8 @@ def panel_parametrizacion(nombre, recursos_disponibles, session_key):
     with col3:
         sel_pct = st.number_input(
             "% asignado", min_value=0.0, max_value=100.0, value=10.0,
-            step=0.0001, format="%.6f", key=f"sel_pct_{session_key}",
-            help="Puedes ingresar hasta 6 decimales para minimizar la diferencia de redondeo en el monto resultante. La columna '% ASIGNADO' del reporte final siempre se mostrará con 2 decimales (formato regulatorio), pero el MONTO se calcula con la precisión completa que ingreses aquí.",
+            step=0.0000000001, format="%.10f", key=f"sel_pct_{session_key}",
+            help="Puedes ingresar hasta 10 decimales para minimizar la diferencia de redondeo en el monto resultante (con montos de cientos de millones, 6 decimales aún puede dejar una diferencia de $10-30; con 9-10 decimales queda en centavos). La columna '% ASIGNADO' del reporte final siempre se mostrará con 2 decimales (formato regulatorio), pero el MONTO se calcula con la precisión completa que ingreses aquí.",
         )
     with col4:
         st.write("")
@@ -1169,7 +1169,7 @@ def panel_parametrizacion(nombre, recursos_disponibles, session_key):
             c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
             c1.write(cod_r)
             c2.write(f"{cod_s} - {SERVICIOS_NO_REGULADOS.get(cod_s, '')}")
-            c3.write(f"{pct:.6%}")
+            c3.write(f"{pct:.9%}")
             if c4.button("Quitar", key=f"del_{session_key}_{i}"):
                 st.session_state[session_key].pop(i)
                 st.rerun()
@@ -3039,8 +3039,8 @@ def panel_parametrizacion_proceso_generico(nombre, recursos_disponibles, session
     with col3:
         sel_pct = st.number_input(
             "% asignado", min_value=0.0, max_value=100.0, value=10.0,
-            step=0.0001, format="%.6f", key=f"sel_pct_proc_{session_key}",
-            help="Puedes ingresar hasta 6 decimales para minimizar la diferencia de redondeo en el monto resultante.",
+            step=0.0000000001, format="%.10f", key=f"sel_pct_proc_{session_key}",
+            help="Puedes ingresar hasta 10 decimales para minimizar la diferencia de redondeo en el monto resultante.",
         )
     with col4:
         st.write("")
@@ -3052,7 +3052,7 @@ def panel_parametrizacion_proceso_generico(nombre, recursos_disponibles, session
             c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
             c1.write(cod_r)
             c2.write(f"{cod_p} - {PROCESO_NOMBRE.get(cod_p, '')}")
-            c3.write(f"{pct:.6%}")
+            c3.write(f"{pct:.9%}")
             if c4.button("Quitar", key=f"del_proc_{session_key}_{i}"):
                 st.session_state[session_key].pop(i)
                 st.rerun()
