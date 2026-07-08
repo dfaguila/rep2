@@ -647,12 +647,12 @@ def procesar_familia_plana(agg, EMPRESA, PERIODO, ANIO, SECTOR, tablas_specs, pa
         fam = familia(1101)
         k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
         agg[k][0] += gasto_no_act * pct_reg
-        agg[k][1] += monto_act * pct_reg
+        agg[k][1] += monto_act  # monto activado SIEMPRE 100% al servicio regulado por defecto
         for cod_serv_noreg, pct in overrides:
             fam2 = familia(cod_serv_noreg)
             k2 = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam2)
             agg[k2][0] += gasto_no_act * pct
-            agg[k2][1] += monto_act * pct
+            # el monto activado no se traspasa a servicios no regulados
     return by_recurso
 
 
@@ -804,16 +804,15 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
             fam = familia(1101)
             k = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam)
             agg[k][0] += total_gasto * pct_reg
-            agg[k][1] += monto_act * pct_reg
+            agg[k][1] += monto_act  # monto activado SIEMPRE 100% al servicio regulado por defecto
             st_by_recurso[cod_recurso][0] += total_gasto * pct_reg
-            st_by_recurso[cod_recurso][1] += monto_act * pct_reg
+            st_by_recurso[cod_recurso][1] += monto_act
             for cod_serv_noreg, pct in overrides:
                 fam2 = familia(cod_serv_noreg)
                 k2 = (EMPRESA, PERIODO, ANIO, SECTOR, cod_recurso, fam2)
                 agg[k2][0] += total_gasto * pct
-                agg[k2][1] += monto_act * pct
+                # el monto activado no se traspasa a servicios no regulados
                 st_by_recurso[cod_recurso][0] += total_gasto * pct
-                st_by_recurso[cod_recurso][1] += monto_act * pct
 
     # --- GPA: Gasto Prestaciones Asociadas (6 tablas, 100% a servicio fijo por tabla) ---
     gpa_by_recurso = defaultdict(lambda: [0.0, 0.0])
@@ -1995,12 +1994,12 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
             overrides = ggm_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
-            agg_serv[(1101, cod_recurso)][1] += monto_act * pct_reg
+            agg_serv[(1101, cod_recurso)][1] += monto_act  # monto activado SIEMPRE 100% regulado
             for cod_serv_over, pct_o in overrides:
                 agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
-                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+                # el monto activado no se traspasa a servicios no regulados
             ggm_regulado_por_recurso[cod_recurso][0] += total_gasto * pct_reg
-            ggm_regulado_por_recurso[cod_recurso][1] += monto_act * pct_reg
+            ggm_regulado_por_recurso[cod_recurso][1] += monto_act
 
     def _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, defaults_map):
         if gasto_g == 0 and gasto_a == 0:
@@ -2041,12 +2040,12 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
         overrides = ogg_params.get(cod_recurso, [])
         pct_reg = 1.0 - sum(p for _, p in overrides)
         agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
-        agg_serv[(1101, cod_recurso)][1] += monto_act * pct_reg
+        agg_serv[(1101, cod_recurso)][1] += monto_act  # monto activado SIEMPRE 100% regulado
         for cod_serv_over, pct_o in overrides:
             agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
-            agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+            # el monto activado no se traspasa a servicios no regulados
         ogg_regulado_por_recurso[cod_recurso][0] += total_gasto * pct_reg
-        ogg_regulado_por_recurso[cod_recurso][1] += monto_act * pct_reg
+        ogg_regulado_por_recurso[cod_recurso][1] += monto_act
 
     for cod_recurso, (gasto_g, gasto_a) in ogg_regulado_por_recurso.items():
         proceso_default = DEFAULT_PROCESO_OGG.get(cod_recurso, DEFAULT_PROCESO_OGG_FALLBACK)
@@ -2066,12 +2065,12 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
         overrides = mei_params.get(cod_recurso, [])
         pct_reg = 1.0 - sum(p for _, p in overrides)
         gasto_reg = total_gasto * pct_reg
-        act_reg = monto_act * pct_reg
+        act_reg = monto_act  # monto activado SIEMPRE 100% regulado
         agg_serv[(1101, cod_recurso)][0] += gasto_reg
         agg_serv[(1101, cod_recurso)][1] += act_reg
         for cod_serv_over, pct_o in overrides:
             agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
-            agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+            # el monto activado no se traspasa a servicios no regulados
         if gasto_reg == 0 and act_reg == 0:
             continue
         cod_actividad = OBRA_NBI_A_ACTIVIDAD.get(cod_obra_nbi)
@@ -2091,12 +2090,12 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
             overrides = mei_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             gasto_reg = total_gasto * pct_reg
-            act_reg = monto_act * pct_reg
+            act_reg = monto_act  # monto activado SIEMPRE 100% regulado
             agg_serv[(1101, cod_recurso)][0] += gasto_reg
             agg_serv[(1101, cod_recurso)][1] += act_reg
             for cod_serv_over, pct_o in overrides:
                 agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
-                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+                # el monto activado no se traspasa a servicios no regulados
             if gasto_reg == 0 and act_reg == 0:
                 continue
             agg_act[(int(cod_actividad), cod_recurso)][0] += gasto_reg
@@ -2122,12 +2121,12 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
             overrides = st_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             gasto_reg = total_gasto * pct_reg
-            act_reg = monto_act * pct_reg
+            act_reg = monto_act  # monto activado SIEMPRE 100% regulado
             agg_serv[(1101, cod_recurso)][0] += gasto_reg
             agg_serv[(1101, cod_recurso)][1] += act_reg
             for cod_serv_over, pct_o in overrides:
                 agg_serv[(cod_serv_over, cod_recurso)][0] += total_gasto * pct_o
-                agg_serv[(cod_serv_over, cod_recurso)][1] += monto_act * pct_o
+                # el monto activado no se traspasa a servicios no regulados
             if gasto_reg == 0 and act_reg == 0:
                 continue
             agg_act[(cod_actividad, cod_recurso)][0] += gasto_reg
