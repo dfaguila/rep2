@@ -24,6 +24,9 @@ from collections import defaultdict
 import openpyxl
 import pandas as pd
 import streamlit as st
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, BarChart, Reference
@@ -3169,6 +3172,10 @@ if run_rep3:
         st.error("No se generó ninguna fila de REP_3. Verifica que hayas cargado al menos GRH_8+GRH_11+GRH_12, o alguna otra familia con su tabla de proceso.")
     else:
         st.success(f"REP_3 generado con {len(final_rows3)} filas.")
+        st.session_state['last_final_rows3'] = final_rows3
+        st.session_state['last_avisos3'] = avisos3
+        if final_rows3:
+            st.session_state['last_epas'] = tuple(final_rows3[0][:4])
         if avisos3:
             with st.expander(f"⚠️ Avisos REP_3 ({len(avisos3)})", expanded=True):
                 for a in avisos3:
@@ -3366,6 +3373,10 @@ if run_cyg:
 
     total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
     st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
+    st.session_state['last_cyg14'] = cyg14
+    st.session_state['last_cyg8'] = cyg8
+    st.session_state['last_cyg9'] = cyg9
+    st.session_state['last_avisos_cyg'] = avisos_cyg
     for nombre, filas in cyg14.items():
         st.write(f"**{nombre}**: {len(filas)} filas")
     st.write(f"**CYG_8**: {len(cyg8)} filas")
@@ -3383,3 +3394,284 @@ if run_cyg:
         file_name="CYG.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+# ============================================================================
+# MINUTA DE CRITERIOS DE ASIGNACIÓN (Word, generada dinámicamente)
+# ============================================================================
+def build_minuta_docx(ggm_params, ogg_params, mei_params, st_params,
+                       ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+                       by_recurso_planas=None, epas=None):
+    """Genera una minuta Word que documenta:
+    1. Los criterios de asignación POR DEFECTO usados por el sistema (fijos,
+       acordados con la jefatura).
+    2. La parametrización ADICIONAL efectivamente ejecutada en ESTA
+       generación (dinámica: solo aparece lo que el usuario configuró)."""
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    by_recurso_planas = by_recurso_planas or {}
+
+    doc = Document()
+
+    title = doc.add_heading("Minuta de Criterios de Asignación de Gasto", level=0)
+    if epas:
+        empresa, periodo, anio, sector = epas
+        p = doc.add_paragraph()
+        p.add_run(f"Empresa {empresa} · Período {periodo} · Año Informado {anio} · Sector {sector}").italic = True
+
+    doc.add_paragraph(
+        "Este documento resume, para la generación de REP_2, REP_3 y las tablas CYG "
+        "correspondientes: (1) los criterios de asignación POR DEFECTO definidos por el "
+        "sistema para las familias sin tabla de apertura propia, y (2) la parametrización "
+        "ADICIONAL que el usuario configuró y ejecutó en esta generación específica, "
+        "desviándose de esos defaults."
+    )
+
+    # ---------------- SECCIÓN 1: DEFAULTS ----------------
+    doc.add_heading("1. Criterios de Asignación por Defecto", level=1)
+
+    doc.add_heading("1.1 Asignación de Servicio (REP_2 / CYG_1-4)", level=2)
+    doc.add_paragraph(
+        "Las familias GGM, OGG, MEI y ST no tienen tabla propia de apertura por servicio. "
+        "Por defecto, el 100% del Gasto Anual de cada recurso se asigna al servicio regulado "
+        "1101. El Monto Activado SIEMPRE se mantiene 100% en el servicio 1101, "
+        "independiente de cualquier parametrización de servicio no regulado."
+    )
+    doc.add_paragraph(
+        "GPA tiene un servicio FIJO por tabla (no configurable): GPA_1→1201, GPA_2→1202, "
+        "GPA_3→1203, GPA_4→1204, GPA_5→1205, GPA_6→1201."
+    )
+
+    doc.add_heading("1.2 Asignación de Proceso / Actividad (REP_3 / CYG_8)", level=2)
+    tabla_defaults = doc.add_table(rows=1, cols=3)
+    tabla_defaults.style = "Light Grid Accent 1"
+    hdr = tabla_defaults.rows[0].cells
+    hdr[0].text, hdr[1].text, hdr[2].text = "Familia / Recurso", "Asignación por defecto", "Justificación"
+    filas_default = [
+        ("GGI (todos los recursos)", "Reparto equitativo entre las 21 actividades del proceso 504", "Sin tabla de actividad propia"),
+        ("GGM 2401-2409 (TI/telecom)", "100% → proceso 505 Informática", "Naturaleza informática/telecom del gasto"),
+        ("GGM 2410-2411 (materiales)", "100% → proceso 504 Abastecimiento", "Materiales de compra/abastecimiento general"),
+        ("OGG 2501-2502 (Directorio)", "100% → proceso 501 Dirección Superior", "Gasto de gobierno corporativo"),
+        ("OGG resto", "100% → proceso 502 Admin. y Finanzas", "Naturaleza administrativa/financiera general"),
+        ("MEI_1 (4101, Q. Químicos)", "Proceso/actividad EXACTA vía tabla OBRA_TIPO_NBI", "Mapeo determinístico entregado por la jefatura"),
+        ("GPA (todas las tablas)", "Reparto equitativo dentro del subproceso propio (proceso 601)", "Cada tabla = una prestación asociada específica"),
+    ]
+    for f, a, j in filas_default:
+        row = tabla_defaults.add_row().cells
+        row[0].text, row[1].text, row[2].text = f, a, j
+
+    # ---------------- SECCIÓN 2: PARAMETRIZACIÓN EJECUTADA ----------------
+    doc.add_heading("2. Parametrización Adicional Ejecutada en esta Generación", level=1)
+
+    def _nombre_servicio(cod):
+        return SERVICIOS_NO_REGULADOS.get(cod, f"Servicio {cod}")
+
+    hubo_parametrizacion = False
+
+    doc.add_heading("2.1 Reasignación de Servicio (desvío desde el servicio regulado 1101)", level=2)
+    params_servicio = [("GGM", ggm_params), ("OGG", ogg_params), ("MEI", mei_params), ("ST", st_params)]
+    filas_serv = []
+    for nombre_familia, params in params_servicio:
+        recurso_totales = by_recurso_planas.get(nombre_familia, {})
+        for cod_recurso, overrides in params.items():
+            if not overrides:
+                continue
+            total_original = recurso_totales.get(cod_recurso, [0.0, 0.0])[0]
+            for cod_serv_destino, pct in overrides:
+                monto = total_original * pct
+                filas_serv.append((nombre_familia, cod_recurso, cod_serv_destino, _nombre_servicio(cod_serv_destino), pct, monto))
+
+    if filas_serv:
+        hubo_parametrizacion = True
+        tabla_serv = doc.add_table(rows=1, cols=6)
+        tabla_serv.style = "Light Grid Accent 1"
+        hdr = tabla_serv.rows[0].cells
+        for i, h in enumerate(["Familia", "Recurso", "Servicio Destino", "Nombre Servicio", "%", "Monto Estimado ($)"]):
+            hdr[i].text = h
+        for fam, rec, serv, nombre_s, pct, monto in filas_serv:
+            row = tabla_serv.add_row().cells
+            row[0].text = fam
+            row[1].text = str(rec)
+            row[2].text = str(serv)
+            row[3].text = nombre_s
+            row[4].text = f"{pct*100:.6f}%"
+            row[5].text = f"{monto:,.0f}"
+    else:
+        doc.add_paragraph("No se configuró ninguna reasignación de servicio en esta generación; se utilizó el default (100% servicio 1101) para todos los recursos de estas familias.")
+
+    doc.add_heading("2.2 Reasignación de Proceso (desvío desde el proceso/actividad por defecto)", level=2)
+    params_proceso = [("GGM", ggm_proceso_params), ("OGG", ogg_proceso_params), ("MEI_1", mei_proceso_params), ("GPA", gpa_proceso_params)]
+    filas_proc = []
+    for nombre_familia, params in params_proceso:
+        for cod_recurso, overrides in params.items():
+            if not overrides:
+                continue
+            for cod_proceso_destino, pct in overrides:
+                filas_proc.append((nombre_familia, cod_recurso, cod_proceso_destino, nombre_proceso(cod_proceso_destino), pct))
+
+    if filas_proc:
+        hubo_parametrizacion = True
+        tabla_proc = doc.add_table(rows=1, cols=5)
+        tabla_proc.style = "Light Grid Accent 1"
+        hdr = tabla_proc.rows[0].cells
+        for i, h in enumerate(["Familia", "Recurso", "Proceso Destino", "Nombre Proceso", "%"]):
+            hdr[i].text = h
+        for fam, rec, proc, nombre_p, pct in filas_proc:
+            row = tabla_proc.add_row().cells
+            row[0].text = fam
+            row[1].text = str(rec)
+            row[2].text = str(proc)
+            row[3].text = nombre_p
+            row[4].text = f"{pct*100:.6f}%"
+    else:
+        doc.add_paragraph("No se configuró ninguna reasignación de proceso en esta generación; se utilizaron los defaults de la sección 1.2 para todos los recursos de estas familias.")
+
+    doc.add_paragraph()
+    nota = doc.add_paragraph()
+    nota.add_run(
+        "Nota: esta minuta refleja el estado de la parametrización EN EL MOMENTO de generar "
+        "este documento. Si se modifica la parametrización y se vuelve a generar REP_2/REP_3/CYG, "
+        "debe volver a generarse esta minuta para que quede actualizada."
+    ).italic = True
+
+    # Corrige un detalle de settings.xml (atributo 'percent' del zoom) que
+    # python-docx a veces omite; Word lo tolera pero validadores XSD lo marcan.
+    try:
+        settings = doc.settings.element
+        for zoom in settings.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}zoom"):
+            if zoom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent") is None:
+                zoom.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent", "100")
+    except Exception:
+        pass
+
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out
+
+
+st.divider()
+st.header("📄 Minuta de Criterios de Asignación")
+st.caption(
+    "Genera un documento Word que explica los criterios de asignación por defecto "
+    "y detalla la parametrización adicional (servicio y proceso) efectivamente "
+    "configurada en esta sesión — útil para respaldo documental ante la jefatura o auditoría."
+)
+if st.button("Generar Minuta (Word)"):
+    try:
+        minuta_bytes = build_minuta_docx(
+            ggm_params, ogg_params, mei_params, st_params,
+            ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+            by_recurso_planas=st.session_state.get('last_by_recurso_planas'),
+            epas=st.session_state.get('last_epas'),
+        )
+        st.session_state['minuta_bytes'] = minuta_bytes.getvalue()
+        st.success("Minuta generada.")
+    except Exception as e:
+        st.error(f"Error generando la minuta: {e}")
+
+if 'minuta_bytes' in st.session_state:
+    st.download_button(
+        "Descargar Minuta_Parametrizacion.docx",
+        data=st.session_state['minuta_bytes'],
+        file_name="Minuta_Parametrizacion.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+# ============================================================================
+# PANEL DE VALIDACIÓN CRUZADA — REP_2 vs REP_3 vs CYG (gráfico de barras)
+# ============================================================================
+st.divider()
+st.header("📊 Panel de Validación Cruzada REP_2 / REP_3 / CYG")
+st.caption(
+    "Compara visualmente el Gasto Anual total (regulado y no regulado) de REP_2 "
+    "contra REP_3, CYG_1+CYG_2 (regulado) y CYG_3+CYG_4 (no regulado), para "
+    "verificar de un vistazo que todo cuadre. Requiere haber generado REP_2, "
+    "REP_3 y las tablas CYG en esta misma sesión."
+)
+
+faltan_para_panel = []
+if 'last_final_rows' not in st.session_state:
+    faltan_para_panel.append("REP_2")
+if 'last_final_rows3' not in st.session_state:
+    faltan_para_panel.append("REP_3")
+if 'last_cyg14' not in st.session_state:
+    faltan_para_panel.append("tablas CYG")
+
+if faltan_para_panel:
+    st.info(f"Falta generar: {', '.join(faltan_para_panel)}. Genera los reportes arriba para habilitar este panel.")
+else:
+    final_rows_p2 = st.session_state['last_final_rows']
+    final_rows_p3 = st.session_state['last_final_rows3']
+    cyg14_p = st.session_state['last_cyg14']
+
+    rep2_regulado = sum(r[7] for r in final_rows_p2 if r[5] in (11, 12))
+    rep2_no_regulado = sum(r[7] for r in final_rows_p2 if r[5] in (21, 22))
+    rep2_total = rep2_regulado + rep2_no_regulado
+
+    rep3_total = sum(r[8] for r in final_rows_p3)
+
+    cyg1_total = sum(r[7] for r in cyg14_p.get("CYG_1", []))
+    cyg2_total = sum(r[7] for r in cyg14_p.get("CYG_2", []))
+    cyg3_total = sum(r[7] for r in cyg14_p.get("CYG_3", []))
+    cyg4_total = sum(r[7] for r in cyg14_p.get("CYG_4", []))
+    cyg1_2_total = cyg1_total + cyg2_total
+    cyg3_4_total = cyg3_total + cyg4_total
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("REP_2 — Regulado (11+12)", f"${rep2_regulado:,.0f}")
+        st.metric("REP_3 (total)", f"${rep3_total:,.0f}", delta=f"{rep3_total - rep2_regulado:,.0f}")
+        st.metric("CYG_1 + CYG_2", f"${cyg1_2_total:,.0f}", delta=f"{cyg1_2_total - rep2_regulado:,.0f}")
+    with col2:
+        st.metric("REP_2 — No Regulado (21+22)", f"${rep2_no_regulado:,.0f}")
+        st.metric("CYG_3 + CYG_4", f"${cyg3_4_total:,.0f}", delta=f"{cyg3_4_total - rep2_no_regulado:,.0f}")
+        st.metric("REP_2 — Total", f"${rep2_total:,.0f}")
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    grupo_regulado = ["REP_2\n(Regulado)", "REP_3", "CYG_1+CYG_2"]
+    valores_regulado = [rep2_regulado, rep3_total, cyg1_2_total]
+    grupo_no_regulado = ["REP_2\n(No Regulado)", "CYG_3+CYG_4"]
+    valores_no_regulado = [rep2_no_regulado, cyg3_4_total]
+
+    x_reg = list(range(len(grupo_regulado)))
+    x_noreg = list(range(len(grupo_regulado) + 1, len(grupo_regulado) + 1 + len(grupo_no_regulado)))
+
+    barras_reg = ax.bar(x_reg, valores_regulado, color="#1F4E78", width=0.6, label="Regulado (11+12)")
+    barras_noreg = ax.bar(x_noreg, valores_no_regulado, color="#C00000", width=0.6, label="No Regulado (21+22)")
+
+    for x, v in zip(x_reg, valores_regulado):
+        ax.text(x, v, f"${v:,.0f}", ha="center", va="bottom", fontsize=8)
+    for x, v in zip(x_noreg, valores_no_regulado):
+        ax.text(x, v, f"${v:,.0f}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x_reg + x_noreg)
+    ax.set_xticklabels(grupo_regulado + grupo_no_regulado, fontsize=9)
+    ax.set_ylabel("Gasto Anual ($)")
+    ax.set_title("Validación Cruzada: REP_2 vs REP_3 vs CYG")
+    ax.legend(loc="upper right")
+    ax.ticklabel_format(style="plain", axis="y")
+    fig.tight_layout()
+
+    st.pyplot(fig)
+
+    diff_reg_rep3 = rep3_total - rep2_regulado
+    diff_reg_cyg = cyg1_2_total - rep2_regulado
+    diff_noreg_cyg = cyg3_4_total - rep2_no_regulado
+
+    tolerancia = 10  # pesos, por redondeo
+    ok_rep3 = abs(diff_reg_rep3) <= tolerancia
+    ok_cyg_reg = abs(diff_reg_cyg) <= tolerancia
+    ok_cyg_noreg = abs(diff_noreg_cyg) <= tolerancia
+
+    if ok_rep3 and ok_cyg_reg and ok_cyg_noreg:
+        st.success("✅ Todo cuadra: REP_2, REP_3 y las tablas CYG son consistentes entre sí (diferencias dentro de tolerancia de redondeo).")
+    else:
+        if not ok_rep3:
+            st.warning(f"⚠️ REP_3 difiere de REP_2 (regulado) en ${diff_reg_rep3:,.2f}.")
+        if not ok_cyg_reg:
+            st.warning(f"⚠️ CYG_1+CYG_2 difiere de REP_2 (regulado) en ${diff_reg_cyg:,.2f}.")
+        if not ok_cyg_noreg:
+            st.warning(f"⚠️ CYG_3+CYG_4 difiere de REP_2 (no regulado) en ${diff_noreg_cyg:,.2f}.")
