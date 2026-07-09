@@ -2523,45 +2523,103 @@ st.caption(
 with st.sidebar:
     st.header("Archivos de entrada")
     st.caption(
-        "Sube UN solo archivo .zip con tu carpeta completa (puede tener "
-        "subcarpetas, ej. una carpeta 'ST' con las tablas ST adentro — no "
-        "importa la estructura, el sistema busca cada tabla por su nombre "
-        "en cualquier parte del zip)."
+        "Sube tus archivos de una sola vez: puedes arrastrar la CARPETA "
+        "completa (con sus subcarpetas, ej. una carpeta 'ST' con las tablas "
+        "ST adentro), soltar varios archivos .xlsx sueltos a la vez, o subir "
+        "un .zip de la carpeta — lo que te resulte más cómodo. No importa la "
+        "estructura de subcarpetas (se admite 1 nivel), el sistema busca "
+        "cada tabla por su nombre en cualquier parte."
     )
     st.caption(
         "Los nombres pueden tener texto adicional (ej. 'MEI_1_2025.xlsx' o "
         "'GRH_8 (v2) 2025-07-01.xlsx') — se reconocen igual, mientras "
-        "empiecen con el nombre de la tabla (ej. 'MEI_1', 'GRH_8')."
+        "empiecen con el nombre de la tabla (ej. 'MEI_1', 'GRH_8'). Si vuelves "
+        "a subir una tabla que ya tenías (por ejemplo porque la corregiste), "
+        "se reemplaza automáticamente por la versión nueva."
     )
-    f_zip = st.file_uploader("Carpeta completa (.zip)", type="zip", key="zip_carpeta")
+    f_subidos = st.file_uploader(
+        "Carpeta, archivos .xlsx sueltos, o .zip",
+        type=["zip", "xlsx", "xls"],
+        accept_multiple_files=True,
+        key="archivos_subidos",
+    )
 
     class _ArchivoZip:
         """Envoltorio liviano para que el resto del código (que espera un
         objeto tipo UploadedFile de Streamlit, con .getvalue()/.name) siga
         funcionando igual, sin importar si el archivo vino de un uploader
-        individual o del zip unificado."""
+        individual o de la carga unificada."""
         def __init__(self, name, data):
             self.name = name
             self._data = data
         def getvalue(self):
             return self._data
 
-    if f_zip is not None:
-        if st.session_state.get("_zip_nombre_procesado") != f_zip.name:
-            archivos_zip, avisos_zip = procesar_zip_carpeta(f_zip.getvalue())
+    def _procesar_archivos_subidos(lista_uploaded):
+        """Recibe la lista de UploadedFile (mezcla posible de .zip sueltos,
+        archivos .xlsx sueltos, o ambos -- como cuando se arrastra una
+        carpeta completa, que el navegador entrega como muchos archivos
+        individuales) y devuelve (archivos {tabla: bytes}, avisos).
+        Si una misma tabla aparece más de una vez (ej. subiste una version
+        corregida junto con el resto), se usa la ULTIMA que aparece en la
+        lista subida -- asi una correccion siempre reemplaza a la anterior."""
+        archivos = {}
+        avisos = []
+        catalogo = _catalogo_completo()
+        duplicados = {}
+        no_reconocidos = []
+        for f in lista_uploaded:
+            nombre = f.name
+            datos = f.getvalue()
+            if nombre.lower().endswith(".zip"):
+                archivos_zip_i, avisos_zip_i = procesar_zip_carpeta(datos)
+                for tabla, contenido in archivos_zip_i.items():
+                    if tabla in archivos:
+                        duplicados.setdefault(tabla, []).append(f"{nombre} (dentro del zip)")
+                    archivos[tabla] = contenido
+                avisos.extend(avisos_zip_i)
+                continue
+            nombre_base = os.path.basename(nombre)
+            if nombre_base.startswith("~$"):
+                continue
+            tabla = identificar_tabla_generico(nombre_base, catalogo)
+            if tabla is None:
+                no_reconocidos.append(nombre)
+                continue
+            if tabla in archivos:
+                duplicados.setdefault(tabla, []).append(nombre)
+            archivos[tabla] = datos
+
+        if no_reconocidos:
+            avisos.append(
+                f"{len(no_reconocidos)} archivo(s) no calzaron con ninguna tabla conocida "
+                f"y se ignoraron: {', '.join(no_reconocidos[:10])}" + (", ..." if len(no_reconocidos) > 10 else "")
+            )
+        for tabla, nombres in duplicados.items():
+            avisos.append(
+                f"Se encontró más de un archivo para la tabla {tabla} "
+                f"({', '.join(nombres)}); se usó la ÚLTIMA versión subida "
+                f"(útil si subiste una corrección)."
+            )
+        return archivos, avisos
+
+    if f_subidos:
+        firma_actual = tuple(sorted((f.name, f.size) for f in f_subidos))
+        if st.session_state.get("_archivos_firma") != firma_actual:
+            archivos_zip, avisos_zip = _procesar_archivos_subidos(f_subidos)
             st.session_state["archivos_zip"] = archivos_zip
             st.session_state["avisos_zip"] = avisos_zip
-            st.session_state["_zip_nombre_procesado"] = f_zip.name
+            st.session_state["_archivos_firma"] = firma_actual
 
     archivos_zip = st.session_state.get("archivos_zip", {})
     avisos_zip = st.session_state.get("avisos_zip", [])
 
     if archivos_zip:
-        st.success(f"✅ {len(archivos_zip)} tabla(s) reconocida(s) en el zip.")
+        st.success(f"✅ {len(archivos_zip)} tabla(s) reconocida(s).")
         with st.expander("Ver tablas encontradas"):
             st.write(sorted(archivos_zip.keys()))
         if avisos_zip:
-            with st.expander(f"⚠️ Avisos de carga del zip ({len(avisos_zip)})", expanded=True):
+            with st.expander(f"⚠️ Avisos de carga ({len(avisos_zip)})", expanded=True):
                 for a in avisos_zip:
                     st.markdown(f"- {a}")
 
@@ -3244,7 +3302,7 @@ with st.expander("📂 Parametrización de proceso para REP_3", expanded=False):
     )
     faltan_para_rep3 = [t for t in ["GRH_12", "GCP_6", "GGV_6", "GGI_6"] if t not in archivos_zip]
     if faltan_para_rep3:
-        st.warning(f"Aún faltan en el zip (para la apertura por actividad de REP_3): {', '.join(faltan_para_rep3)}")
+        st.warning(f"Aún faltan (para la apertura por actividad de REP_3): {', '.join(faltan_para_rep3)}")
     else:
         st.success("Todas las tablas de actividad (GRH_12, GCP_6, GGV_6, GGI_6) están cargadas.")
 
@@ -3476,7 +3534,7 @@ with st.expander("📂 Estado de MCO_42 + ING_4 (CYG_9)", expanded=False):
     )
     faltan_mco_ing = [t for t in ["MCO_42", "ING_4"] if t not in archivos_zip]
     if faltan_mco_ing:
-        st.warning(f"Aún faltan en el zip: {', '.join(faltan_mco_ing)} (mientras tanto, CYG_9 declarará todo bajo ID CLIENTE '-1').")
+        st.warning(f"Aún faltan: {', '.join(faltan_mco_ing)} (mientras tanto, CYG_9 declarará todo bajo ID CLIENTE '-1').")
     else:
         st.success("MCO_42 e ING_4 están cargadas.")
 
