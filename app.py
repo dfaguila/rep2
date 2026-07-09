@@ -19,6 +19,7 @@ import io
 import re
 import zipfile
 import os
+import json
 import difflib
 import statistics
 from collections import defaultdict
@@ -2513,6 +2514,91 @@ def checklist_faltantes(archivos, tablas_requeridas):
     return [t for t in tablas_requeridas if t not in archivos]
 
 
+# ============================================================================
+# UX: resúmenes KPI y comparación contra la generación anterior en la sesión
+# ============================================================================
+def mostrar_kpis_rep2(final_rows, avisos):
+    reg = sum(r[7] for r in final_rows if r[5] in (11, 12))
+    noreg = sum(r[7] for r in final_rows if r[5] in (21, 22))
+    recursos = len(set(r[4] for r in final_rows))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gasto Regulado", f"${reg:,.0f}")
+    c2.metric("Gasto No Regulado", f"${noreg:,.0f}")
+    c3.metric("N° Recursos", recursos)
+    c4.metric("Avisos", len(avisos))
+
+
+def mostrar_kpis_rep3(final_rows3, avisos3):
+    total = sum(r[8] for r in final_rows3)
+    procesos = len(set(r[6] for r in final_rows3))
+    recursos = len(set(r[4] for r in final_rows3))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gasto Anual (regulado)", f"${total:,.0f}")
+    c2.metric("N° Procesos", procesos)
+    c3.metric("N° Recursos", recursos)
+    c4.metric("Avisos", len(avisos3))
+
+
+def mostrar_kpis_cyg(cyg14, cyg8, cyg9, avisos_cyg):
+    reg = sum(r[7] for r in cyg14.get("CYG_1", [])) + sum(r[7] for r in cyg14.get("CYG_2", []))
+    noreg = sum(r[7] for r in cyg14.get("CYG_3", [])) + sum(r[7] for r in cyg14.get("CYG_4", []))
+    total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
+
+    anterior = st.session_state.get("diff_prev_cyg_totales")
+    delta_reg = delta_noreg = delta_filas = None
+    if anterior is not None:
+        delta_reg = reg - anterior["reg"]
+        delta_noreg = noreg - anterior["noreg"]
+        delta_filas = total_filas - anterior["filas"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Regulado (CYG_1+CYG_2)", f"${reg:,.0f}", delta=f"{delta_reg:+,.0f}" if delta_reg is not None and abs(delta_reg) > 1 else None)
+    c2.metric("No Regulado (CYG_3+CYG_4)", f"${noreg:,.0f}", delta=f"{delta_noreg:+,.0f}" if delta_noreg is not None and abs(delta_noreg) > 1 else None)
+    c3.metric("Filas totales", f"{total_filas:,}", delta=delta_filas if delta_filas else None)
+    c4.metric("Avisos", len(avisos_cyg))
+    if anterior is not None and (delta_reg or delta_noreg or delta_filas):
+        st.caption("↑↓ Comparado con la generación anterior en esta sesión.")
+    st.session_state["diff_prev_cyg_totales"] = {"reg": reg, "noreg": noreg, "filas": total_filas}
+
+
+def mostrar_comparacion_anterior(clave_diff, filas_nuevas, idx_agrupacion, idx_valor, etiqueta_grupo):
+    """Compara 'filas_nuevas' contra lo guardado en session_state[clave_diff]
+    (la generación anterior EN ESTA MISMA SESIÓN, si existe), agrupando por
+    'idx_agrupacion' (un índice, o una tupla de índices para clave compuesta,
+    ej. (recurso, familia)) y sumando 'idx_valor'. Muestra los cambios y
+    luego actualiza session_state[clave_diff] para la próxima comparación."""
+    def _clave(r):
+        if isinstance(idx_agrupacion, (tuple, list)):
+            return tuple(r[i] for i in idx_agrupacion)
+        return r[idx_agrupacion]
+
+    anterior = st.session_state.get(clave_diff)
+    if anterior is not None:
+        viejo = defaultdict(float)
+        nuevo = defaultdict(float)
+        for r in anterior:
+            viejo[_clave(r)] += r[idx_valor]
+        for r in filas_nuevas:
+            nuevo[_clave(r)] += r[idx_valor]
+        claves = set(viejo) | set(nuevo)
+        cambios = []
+        for k in claves:
+            v_old, v_new = viejo.get(k, 0.0), nuevo.get(k, 0.0)
+            if abs(v_new - v_old) > 1:
+                cambios.append((k, v_old, v_new, v_new - v_old))
+        if cambios:
+            cambios.sort(key=lambda x: -abs(x[3]))
+            with st.expander(f"🔄 Cambios respecto a la generación anterior en esta sesión ({len(cambios)})", expanded=True):
+                df_cambios = pd.DataFrame(cambios, columns=[etiqueta_grupo, "Antes ($)", "Ahora ($)", "Diferencia ($)"])
+                st.dataframe(
+                    df_cambios.style.format({"Antes ($)": "{:,.0f}", "Ahora ($)": "{:,.0f}", "Diferencia ($)": "{:+,.0f}"}),
+                    width="stretch",
+                )
+        else:
+            st.caption("Sin cambios respecto a la generación anterior en esta sesión.")
+    st.session_state[clave_diff] = filas_nuevas
+
+
 # ---------------------------------------------------------------- UI --------
 st.title("Generador REP_2 · Costos y Gastos por Familia de Servicios")
 st.caption(
@@ -2520,186 +2606,287 @@ st.caption(
     "REP_2 exigida por la SISS."
 )
 
-with st.sidebar:
-    st.header("Archivos de entrada")
-    st.caption(
-        "Haz clic en 'Browse files' y selecciona directamente tu CARPETA "
-        "completa (con sus subcarpetas, ej. una carpeta 'ST' con las tablas "
-        "ST adentro) — no hace falta entrar a cada tabla una por una. "
-        "También puedes arrastrar la carpeta, soltar varios .xlsx sueltos, "
-        "o subir un .zip; lo que te resulte más cómodo. No importa la "
-        "estructura de subcarpetas (se admite 1 nivel), el sistema busca "
-        "cada tabla por su nombre en cualquier parte."
-    )
-    st.caption(
-        "Los nombres pueden tener texto adicional (ej. 'MEI_1_2025.xlsx' o "
-        "'GRH_8 (v2) 2025-07-01.xlsx') — se reconocen igual, mientras "
-        "empiecen con el nombre de la tabla (ej. 'MEI_1', 'GRH_8'). Si vuelves "
-        "a subir una tabla que ya tenías (por ejemplo porque la corregiste), "
-        "se reemplaza automáticamente por la versión nueva."
-    )
-    try:
-        # "directory" habilita seleccionar una carpeta completa con un clic
-        # (requiere una versión de Streamlit razonablemente reciente).
-        f_subidos = st.file_uploader(
-            "Carpeta (clic para seleccionarla), archivos .xlsx sueltos, o .zip",
-            type=["zip", "xlsx", "xls"],
-            accept_multiple_files="directory",
-            key="archivos_subidos",
-        )
-    except Exception:
-        st.caption(
-            "ℹ️ Tu versión de Streamlit no soporta seleccionar una carpeta con "
-            "un clic (actualiza streamlit para esa opción); mientras tanto, "
-            "puedes arrastrar la carpeta o subir varios archivos/.zip igual."
-        )
-        f_subidos = st.file_uploader(
-            "Archivos .xlsx sueltos, o .zip (arrastra la carpeta aquí)",
-            type=["zip", "xlsx", "xls"],
-            accept_multiple_files=True,
-            key="archivos_subidos_fallback",
-        )
+modo_jefatura = st.sidebar.toggle(
+    "🔒 Vista Jefatura (solo lectura)",
+    key="modo_jefatura",
+    help="Activa una vista simplificada: sin carga de archivos ni botones de "
+         "generación, solo el resumen y la validación de lo ya generado en esta sesión.",
+)
 
-    class _ArchivoZip:
-        """Envoltorio liviano para que el resto del código (que espera un
+if modo_jefatura:
+    st.title("📊 Resumen Ejecutivo — REP_2 / REP_3 / CYG")
+    st.caption(
+        "Vista de solo lectura: muestra lo ya generado en esta sesión por el "
+        "equipo operativo. Para cargar archivos o generar reportes, desactiva "
+        "'Vista Jefatura' en la barra lateral."
+    )
+
+    hay_rep2 = "last_final_rows" in st.session_state
+    hay_rep3 = "last_final_rows3" in st.session_state
+    hay_cyg = "last_cyg14" in st.session_state
+
+    if not (hay_rep2 or hay_rep3 or hay_cyg):
+        st.info("Aún no se ha generado ningún reporte en esta sesión.")
+    else:
+        if hay_rep2:
+            st.subheader("REP_2 — Costos y Gastos por Familia de Servicios")
+            mostrar_kpis_rep2(st.session_state["last_final_rows"], st.session_state.get("last_avisos", []))
+        if hay_rep3:
+            st.subheader("REP_3 — Costos y Gastos No Activados por Proceso")
+            mostrar_kpis_rep3(st.session_state["last_final_rows3"], st.session_state.get("last_avisos3", []))
+        if hay_cyg:
+            st.subheader("CYG — Costos y Gastos por Recurso")
+            mostrar_kpis_cyg(
+                st.session_state["last_cyg14"],
+                st.session_state.get("last_cyg8", []),
+                st.session_state.get("last_cyg9", []),
+                st.session_state.get("last_avisos_cyg", []),
+            )
+
+        if hay_rep2 and hay_rep3 and hay_cyg:
+            st.divider()
+            st.subheader("✅ Validación cruzada")
+            _r2 = st.session_state["last_final_rows"]
+            _r3 = st.session_state["last_final_rows3"]
+            _c14 = st.session_state["last_cyg14"]
+            _reg2 = sum(r[7] for r in _r2 if r[5] in (11, 12))
+            _noreg2 = sum(r[7] for r in _r2 if r[5] in (21, 22))
+            _tot3 = sum(r[8] for r in _r3)
+            _c12 = sum(r[7] for r in _c14.get("CYG_1", [])) + sum(r[7] for r in _c14.get("CYG_2", []))
+            _c34 = sum(r[7] for r in _c14.get("CYG_3", [])) + sum(r[7] for r in _c14.get("CYG_4", []))
+            _tol = 10
+            if abs(_tot3 - _reg2) <= _tol and abs(_c12 - _reg2) <= _tol and abs(_c34 - _noreg2) <= _tol:
+                st.success("Todo cuadra: REP_2, REP_3 y las tablas CYG son consistentes entre sí.")
+            else:
+                st.warning("Hay diferencias entre reportes fuera de tolerancia — revisar con el equipo operativo.")
+
+        if "minuta_bytes" in st.session_state:
+            st.divider()
+            st.download_button(
+                "📄 Descargar Minuta de Criterios de Asignación",
+                data=st.session_state["minuta_bytes"],
+                file_name="Minuta_Parametrizacion.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+    st.stop()
+
+if not modo_jefatura:
+    with st.sidebar:
+        st.header("Archivos de entrada")
+        st.caption(
+            "Haz clic en 'Browse files' y selecciona directamente tu CARPETA "
+            "completa (con sus subcarpetas, ej. una carpeta 'ST' con las tablas "
+            "ST adentro) — no hace falta entrar a cada tabla una por una. "
+            "También puedes arrastrar la carpeta, soltar varios .xlsx sueltos, "
+            "o subir un .zip; lo que te resulte más cómodo. No importa la "
+            "estructura de subcarpetas (se admite 1 nivel), el sistema busca "
+            "cada tabla por su nombre en cualquier parte."
+        )
+        st.caption(
+            "Los nombres pueden tener texto adicional (ej. 'MEI_1_2025.xlsx' o "
+            "'GRH_8 (v2) 2025-07-01.xlsx') — se reconocen igual, mientras "
+            "empiecen con el nombre de la tabla (ej. 'MEI_1', 'GRH_8'). Si vuelves "
+            "a subir una tabla que ya tenías (por ejemplo porque la corregiste), "
+            "se reemplaza automáticamente por la versión nueva."
+        )
+        try:
+            # "directory" habilita seleccionar una carpeta completa con un clic
+            # (requiere una versión de Streamlit razonablemente reciente).
+            f_subidos = st.file_uploader(
+                "Carpeta (clic para seleccionarla), archivos .xlsx sueltos, o .zip",
+                type=["zip", "xlsx", "xls"],
+                accept_multiple_files="directory",
+                key="archivos_subidos",
+            )
+        except Exception:
+            st.caption(
+                "ℹ️ Tu versión de Streamlit no soporta seleccionar una carpeta con "
+                "un clic (actualiza streamlit para esa opción); mientras tanto, "
+                "puedes arrastrar la carpeta o subir varios archivos/.zip igual."
+            )
+            f_subidos = st.file_uploader(
+                "Archivos .xlsx sueltos, o .zip (arrastra la carpeta aquí)",
+                type=["zip", "xlsx", "xls"],
+                accept_multiple_files=True,
+                key="archivos_subidos_fallback",
+            )
+
+        class _ArchivoZip:
+            """Envoltorio liviano para que el resto del código (que espera un
         objeto tipo UploadedFile de Streamlit, con .getvalue()/.name) siga
         funcionando igual, sin importar si el archivo vino de un uploader
         individual o de la carga unificada."""
-        def __init__(self, name, data):
-            self.name = name
-            self._data = data
-        def getvalue(self):
-            return self._data
+            def __init__(self, name, data):
+                self.name = name
+                self._data = data
+            def getvalue(self):
+                return self._data
 
-    def _procesar_archivos_subidos(lista_uploaded):
-        """Recibe la lista de UploadedFile (mezcla posible de .zip sueltos,
+        def _procesar_archivos_subidos(lista_uploaded):
+            """Recibe la lista de UploadedFile (mezcla posible de .zip sueltos,
         archivos .xlsx sueltos, o ambos -- como cuando se arrastra una
         carpeta completa, que el navegador entrega como muchos archivos
         individuales) y devuelve (archivos {tabla: bytes}, avisos).
         Si una misma tabla aparece más de una vez (ej. subiste una version
         corregida junto con el resto), se usa la ULTIMA que aparece en la
         lista subida -- asi una correccion siempre reemplaza a la anterior."""
-        archivos = {}
-        avisos = []
-        catalogo = _catalogo_completo()
-        duplicados = {}
-        no_reconocidos = []
-        for f in lista_uploaded:
-            nombre = f.name
-            datos = f.getvalue()
-            if nombre.lower().endswith(".zip"):
-                archivos_zip_i, avisos_zip_i = procesar_zip_carpeta(datos)
-                for tabla, contenido in archivos_zip_i.items():
-                    if tabla in archivos:
-                        duplicados.setdefault(tabla, []).append(f"{nombre} (dentro del zip)")
-                    archivos[tabla] = contenido
-                avisos.extend(avisos_zip_i)
-                continue
-            nombre_base = os.path.basename(nombre)
-            if nombre_base.startswith("~$"):
-                continue
-            tabla = identificar_tabla_generico(nombre_base, catalogo)
-            if tabla is None:
-                no_reconocidos.append(nombre)
-                continue
-            if tabla in archivos:
-                duplicados.setdefault(tabla, []).append(nombre)
-            archivos[tabla] = datos
+            archivos = {}
+            avisos = []
+            catalogo = _catalogo_completo()
+            duplicados = {}
+            no_reconocidos = []
+            for f in lista_uploaded:
+                nombre = f.name
+                datos = f.getvalue()
+                if nombre.lower().endswith(".zip"):
+                    archivos_zip_i, avisos_zip_i = procesar_zip_carpeta(datos)
+                    for tabla, contenido in archivos_zip_i.items():
+                        if tabla in archivos:
+                            duplicados.setdefault(tabla, []).append(f"{nombre} (dentro del zip)")
+                        archivos[tabla] = contenido
+                    avisos.extend(avisos_zip_i)
+                    continue
+                nombre_base = os.path.basename(nombre)
+                if nombre_base.startswith("~$"):
+                    continue
+                tabla = identificar_tabla_generico(nombre_base, catalogo)
+                if tabla is None:
+                    no_reconocidos.append(nombre)
+                    continue
+                if tabla in archivos:
+                    duplicados.setdefault(tabla, []).append(nombre)
+                archivos[tabla] = datos
 
-        if no_reconocidos:
-            avisos.append(
-                f"{len(no_reconocidos)} archivo(s) no calzaron con ninguna tabla conocida "
-                f"y se ignoraron: {', '.join(no_reconocidos[:10])}" + (", ..." if len(no_reconocidos) > 10 else "")
+            if no_reconocidos:
+                avisos.append(
+                    f"{len(no_reconocidos)} archivo(s) no calzaron con ninguna tabla conocida "
+                    f"y se ignoraron: {', '.join(no_reconocidos[:10])}" + (", ..." if len(no_reconocidos) > 10 else "")
+                )
+            for tabla, nombres in duplicados.items():
+                avisos.append(
+                    f"Se encontró más de un archivo para la tabla {tabla} "
+                    f"({', '.join(nombres)}); se usó la ÚLTIMA versión subida "
+                    f"(útil si subiste una corrección)."
+                )
+            return archivos, avisos
+
+        if f_subidos:
+            firma_actual = tuple(sorted((f.name, f.size) for f in f_subidos))
+            if st.session_state.get("_archivos_firma") != firma_actual:
+                archivos_zip, avisos_zip = _procesar_archivos_subidos(f_subidos)
+                st.session_state["archivos_zip"] = archivos_zip
+                st.session_state["avisos_zip"] = avisos_zip
+                st.session_state["_archivos_firma"] = firma_actual
+
+        archivos_zip = st.session_state.get("archivos_zip", {})
+        avisos_zip = st.session_state.get("avisos_zip", [])
+
+        if archivos_zip:
+            st.success(f"✅ {len(archivos_zip)} tabla(s) reconocida(s).")
+            with st.expander("Ver tablas encontradas"):
+                st.write(sorted(archivos_zip.keys()))
+            if avisos_zip:
+                with st.expander(f"⚠️ Avisos de carga ({len(avisos_zip)})", expanded=True):
+                    for a in avisos_zip:
+                        st.markdown(f"- {a}")
+
+            st.markdown("**¿Qué falta para cada reporte?**")
+            faltan_rep2 = checklist_faltantes(
+                archivos_zip,
+                ["GRH_8", "GRH_11", "GCP_4", "GCP_5", "GGV_4", "GGV_5", "GGI_5",
+                 "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5", "OGG_5",
+                 "MEI_1", "MEI_2", "MEI_3", "MEI_4"] + ST_TABLES + GPA_TABLES,
             )
-        for tabla, nombres in duplicados.items():
-            avisos.append(
-                f"Se encontró más de un archivo para la tabla {tabla} "
-                f"({', '.join(nombres)}); se usó la ÚLTIMA versión subida "
-                f"(útil si subiste una corrección)."
+            faltan_rep3_extra = checklist_faltantes(archivos_zip, ["GRH_12", "GCP_6", "GGV_6", "GGI_6"])
+            faltan_cyg9 = checklist_faltantes(archivos_zip, ["MCO_42", "ING_4"])
+
+            if faltan_rep2:
+                st.caption(f"Para REP_2 aún faltan: {', '.join(faltan_rep2)}")
+            else:
+                st.caption("✅ REP_2: todas las tablas base están.")
+            if faltan_rep3_extra:
+                st.caption(f"Para REP_3 (además de lo de REP_2) faltan: {', '.join(faltan_rep3_extra)}")
+            else:
+                st.caption("✅ REP_3: tablas de actividad completas.")
+            if faltan_cyg9:
+                st.caption(f"Para CYG_9 (clientes) faltan: {', '.join(faltan_cyg9)}")
+            else:
+                st.caption("✅ CYG_9: MCO_42 e ING_4 están.")
+
+        st.markdown("**Plantilla (opcional)**")
+        f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
+
+        def _get(nombre):
+            return _ArchivoZip(f"{nombre}.xlsx", archivos_zip[nombre]) if nombre in archivos_zip else None
+
+        f_grh8 = _get("GRH_8")
+        f_grh11 = _get("GRH_11")
+        f_gcp4 = _get("GCP_4")
+        f_gcp5 = _get("GCP_5")
+        f_ggv4 = _get("GGV_4")
+        f_ggv5 = _get("GGV_5")
+        f_ggi5 = _get("GGI_5")
+        f_ggm1 = _get("GGM_1")
+        f_ggm2 = _get("GGM_2")
+        f_ggm3 = _get("GGM_3")
+        f_ggm4 = _get("GGM_4")
+        f_ggm5 = _get("GGM_5")
+        f_ogg5 = _get("OGG_5")
+        f_mei1 = _get("MEI_1")
+        f_mei2 = _get("MEI_2")
+        f_mei3 = _get("MEI_3")
+        f_mei4 = _get("MEI_4")
+        f_grh12 = _get("GRH_12")
+        f_gcp6 = _get("GCP_6")
+        f_ggv6 = _get("GGV_6")
+        f_ggi6 = _get("GGI_6")
+        f_mco42 = _get("MCO_42")
+        f_ing4 = _get("ING_4")
+
+        f_st_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in ST_TABLES if t in archivos_zip] or None
+        f_gpa_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in GPA_TABLES if t in archivos_zip] or None
+        f_gpa_files_rep3 = f_gpa_files
+
+        archivos_regulares = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
+                               f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
+                               f_mei1, f_mei2, f_mei3, f_mei4]
+        hay_algo_cargado = any(archivos_regulares) or bool(f_st_files) or bool(f_gpa_files)
+
+        st.divider()
+        PARAM_SESSION_KEYS = [
+            "ggm_overrides", "ogg_overrides", "mei_overrides", "st_overrides",
+            "ggm_proceso_overrides", "ogg_proceso_overrides", "mei_proceso_overrides", "gpa_proceso_overrides",
+        ]
+        with st.expander("💾 Guardar / Cargar Parametrización"):
+            st.caption(
+                "La parametrización que configures (servicio y proceso) vive solo "
+                "en esta sesión del navegador — se pierde si recargas la página. "
+                "Descárgala para poder volver a cargarla la próxima vez, sin "
+                "reconfigurar todo de nuevo."
             )
-        return archivos, avisos
-
-    if f_subidos:
-        firma_actual = tuple(sorted((f.name, f.size) for f in f_subidos))
-        if st.session_state.get("_archivos_firma") != firma_actual:
-            archivos_zip, avisos_zip = _procesar_archivos_subidos(f_subidos)
-            st.session_state["archivos_zip"] = archivos_zip
-            st.session_state["avisos_zip"] = avisos_zip
-            st.session_state["_archivos_firma"] = firma_actual
-
-    archivos_zip = st.session_state.get("archivos_zip", {})
-    avisos_zip = st.session_state.get("avisos_zip", [])
-
-    if archivos_zip:
-        st.success(f"✅ {len(archivos_zip)} tabla(s) reconocida(s).")
-        with st.expander("Ver tablas encontradas"):
-            st.write(sorted(archivos_zip.keys()))
-        if avisos_zip:
-            with st.expander(f"⚠️ Avisos de carga ({len(avisos_zip)})", expanded=True):
-                for a in avisos_zip:
-                    st.markdown(f"- {a}")
-
-        st.markdown("**¿Qué falta para cada reporte?**")
-        faltan_rep2 = checklist_faltantes(
-            archivos_zip,
-            ["GRH_8", "GRH_11", "GCP_4", "GCP_5", "GGV_4", "GGV_5", "GGI_5",
-             "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5", "OGG_5",
-             "MEI_1", "MEI_2", "MEI_3", "MEI_4"] + ST_TABLES + GPA_TABLES,
-        )
-        faltan_rep3_extra = checklist_faltantes(archivos_zip, ["GRH_12", "GCP_6", "GGV_6", "GGI_6"])
-        faltan_cyg9 = checklist_faltantes(archivos_zip, ["MCO_42", "ING_4"])
-
-        if faltan_rep2:
-            st.caption(f"Para REP_2 aún faltan: {', '.join(faltan_rep2)}")
-        else:
-            st.caption("✅ REP_2: todas las tablas base están.")
-        if faltan_rep3_extra:
-            st.caption(f"Para REP_3 (además de lo de REP_2) faltan: {', '.join(faltan_rep3_extra)}")
-        else:
-            st.caption("✅ REP_3: tablas de actividad completas.")
-        if faltan_cyg9:
-            st.caption(f"Para CYG_9 (clientes) faltan: {', '.join(faltan_cyg9)}")
-        else:
-            st.caption("✅ CYG_9: MCO_42 e ING_4 están.")
-
-    st.markdown("**Plantilla (opcional)**")
-    f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
-
-    def _get(nombre):
-        return _ArchivoZip(f"{nombre}.xlsx", archivos_zip[nombre]) if nombre in archivos_zip else None
-
-    f_grh8 = _get("GRH_8")
-    f_grh11 = _get("GRH_11")
-    f_gcp4 = _get("GCP_4")
-    f_gcp5 = _get("GCP_5")
-    f_ggv4 = _get("GGV_4")
-    f_ggv5 = _get("GGV_5")
-    f_ggi5 = _get("GGI_5")
-    f_ggm1 = _get("GGM_1")
-    f_ggm2 = _get("GGM_2")
-    f_ggm3 = _get("GGM_3")
-    f_ggm4 = _get("GGM_4")
-    f_ggm5 = _get("GGM_5")
-    f_ogg5 = _get("OGG_5")
-    f_mei1 = _get("MEI_1")
-    f_mei2 = _get("MEI_2")
-    f_mei3 = _get("MEI_3")
-    f_mei4 = _get("MEI_4")
-    f_grh12 = _get("GRH_12")
-    f_gcp6 = _get("GCP_6")
-    f_ggv6 = _get("GGV_6")
-    f_ggi6 = _get("GGI_6")
-    f_mco42 = _get("MCO_42")
-    f_ing4 = _get("ING_4")
-
-    f_st_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in ST_TABLES if t in archivos_zip] or None
-    f_gpa_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in GPA_TABLES if t in archivos_zip] or None
-    f_gpa_files_rep3 = f_gpa_files
-
-    archivos_regulares = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
-                           f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
-                           f_mei1, f_mei2, f_mei3, f_mei4]
-    hay_algo_cargado = any(archivos_regulares) or bool(f_st_files) or bool(f_gpa_files)
+            datos_export = {k: st.session_state.get(k, []) for k in PARAM_SESSION_KEYS}
+            hay_parametrizacion = any(datos_export.values())
+            json_bytes = json.dumps(datos_export, ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button(
+                "Descargar parametrización (.json)",
+                data=json_bytes,
+                file_name="parametrizacion_suralis.json",
+                mime="application/json",
+                disabled=not hay_parametrizacion,
+                help=None if hay_parametrizacion else "Aún no has configurado ninguna parametrización.",
+            )
+            f_param_json = st.file_uploader("Cargar parametrización (.json)", type="json", key="param_json_uploader")
+            if f_param_json is not None and st.session_state.get("_param_json_procesado") != f_param_json.name:
+                try:
+                    datos_import = json.loads(f_param_json.getvalue().decode("utf-8"))
+                    for k in PARAM_SESSION_KEYS:
+                        if k in datos_import:
+                            st.session_state[k] = [tuple(x) for x in datos_import[k]]
+                    st.session_state["_param_json_procesado"] = f_param_json.name
+                    st.success("Parametrización cargada correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo leer el archivo de parametrización: {e}")
 
 
 # ============================================================================
@@ -2895,6 +3082,8 @@ if vista_activa == "REP":
             st.error("No se generó ninguna fila. Revisa que al menos una tabla tenga datos válidos.")
             st.stop()
         st.success(f"REP_2 generado con {len(df)} filas.")
+        mostrar_kpis_rep2(final_rows, avisos)
+        mostrar_comparacion_anterior("diff_prev_rep2", final_rows, idx_agrupacion=(4, 5), idx_valor=7, etiqueta_grupo="(Recurso, Familia)")
         st.session_state['last_final_rows'] = final_rows
         st.session_state['last_familia_map'] = familia_map
         st.session_state['last_by_recurso_planas'] = by_recurso_planas
@@ -3486,6 +3675,8 @@ if vista_activa == "REP":
             st.error("No se generó ninguna fila de REP_3. Verifica que hayas cargado al menos GRH_8+GRH_11+GRH_12, o alguna otra familia con su tabla de proceso.")
         else:
             st.success(f"REP_3 generado con {len(final_rows3)} filas.")
+            mostrar_kpis_rep3(final_rows3, avisos3)
+            mostrar_comparacion_anterior("diff_prev_rep3", final_rows3, idx_agrupacion=(4, 5, 6), idx_valor=8, etiqueta_grupo="(Recurso, Familia, Proceso)")
             st.session_state['last_final_rows3'] = final_rows3
             st.session_state['last_avisos3'] = avisos3
             if final_rows3:
@@ -3693,6 +3884,7 @@ if vista_activa == "CYG":
 
         total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
         st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
+        mostrar_kpis_cyg(cyg14, cyg8, cyg9, avisos_cyg)
         st.session_state['last_cyg14'] = cyg14
         st.session_state['last_cyg8'] = cyg8
         st.session_state['last_cyg9'] = cyg9
