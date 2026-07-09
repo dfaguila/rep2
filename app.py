@@ -2523,10 +2523,11 @@ st.caption(
 with st.sidebar:
     st.header("Archivos de entrada")
     st.caption(
-        "Sube tus archivos de una sola vez: puedes arrastrar la CARPETA "
+        "Haz clic en 'Browse files' y selecciona directamente tu CARPETA "
         "completa (con sus subcarpetas, ej. una carpeta 'ST' con las tablas "
-        "ST adentro), soltar varios archivos .xlsx sueltos a la vez, o subir "
-        "un .zip de la carpeta — lo que te resulte más cómodo. No importa la "
+        "ST adentro) — no hace falta entrar a cada tabla una por una. "
+        "También puedes arrastrar la carpeta, soltar varios .xlsx sueltos, "
+        "o subir un .zip; lo que te resulte más cómodo. No importa la "
         "estructura de subcarpetas (se admite 1 nivel), el sistema busca "
         "cada tabla por su nombre en cualquier parte."
     )
@@ -2537,12 +2538,27 @@ with st.sidebar:
         "a subir una tabla que ya tenías (por ejemplo porque la corregiste), "
         "se reemplaza automáticamente por la versión nueva."
     )
-    f_subidos = st.file_uploader(
-        "Carpeta, archivos .xlsx sueltos, o .zip",
-        type=["zip", "xlsx", "xls"],
-        accept_multiple_files=True,
-        key="archivos_subidos",
-    )
+    try:
+        # "directory" habilita seleccionar una carpeta completa con un clic
+        # (requiere una versión de Streamlit razonablemente reciente).
+        f_subidos = st.file_uploader(
+            "Carpeta (clic para seleccionarla), archivos .xlsx sueltos, o .zip",
+            type=["zip", "xlsx", "xls"],
+            accept_multiple_files="directory",
+            key="archivos_subidos",
+        )
+    except Exception:
+        st.caption(
+            "ℹ️ Tu versión de Streamlit no soporta seleccionar una carpeta con "
+            "un clic (actualiza streamlit para esa opción); mientras tanto, "
+            "puedes arrastrar la carpeta o subir varios archivos/.zip igual."
+        )
+        f_subidos = st.file_uploader(
+            "Archivos .xlsx sueltos, o .zip (arrastra la carpeta aquí)",
+            type=["zip", "xlsx", "xls"],
+            accept_multiple_files=True,
+            key="archivos_subidos_fallback",
+        )
 
     class _ArchivoZip:
         """Envoltorio liviano para que el resto del código (que espera un
