@@ -17,6 +17,8 @@ servicios no regulados.
 
 import io
 import re
+import zipfile
+import os
 import difflib
 import statistics
 from collections import defaultdict
@@ -2408,6 +2410,109 @@ def build_cyg_9(agg_serv, mco42_bytes, ing4_bytes, empresa_periodo_anio_sector):
     return final_rows, avisos
 
 
+
+# ============================================================================
+# CARGA UNIFICADA: una sola carpeta comprimida (.zip) con todas las tablas
+# ============================================================================
+# El usuario sube UN solo archivo .zip (su carpeta completa, con subcarpetas
+# como "ST/", "GPA/", etc. si quiere organizarlas así -- no importa la
+# estructura de carpetas, solo el NOMBRE de cada archivo). El sistema busca,
+# dentro del zip, cada tabla que necesita, tolerando texto adicional en el
+# nombre (ej. "MEI_1_2025.xlsx" o "MEI_1 (v2) 2025-07.xlsx" calzan con "MEI_1").
+
+# Tablas "simples" (nombre único, sin variantes ST_x/GPA_x)
+TABLAS_SIMPLES = [
+    "GRH_8", "GRH_11", "GRH_12",
+    "GCP_4", "GCP_5", "GCP_6",
+    "GGV_4", "GGV_5", "GGV_6",
+    "GGI_5", "GGI_6",
+    "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5",
+    "OGG_5",
+    "MEI_1", "MEI_2", "MEI_3", "MEI_4",
+    "MCO_42", "ING_4",
+]
+
+# Catálogo completo para el emparejamiento (simples + ST_x + GPA_x)
+def _catalogo_completo():
+    return TABLAS_SIMPLES + ST_TABLES + GPA_TABLES
+
+
+def identificar_tabla_generico(nombre_archivo, catalogo):
+    """Extrae el nombre de tabla (ej. 'MEI_1', 'ST_12', 'GRH_8') de un nombre
+    de archivo, tolerando texto adicional después (fecha, versión, etc.),
+    sin importar mayúsculas/minúsculas. Se compara por el nombre MÁS LARGO
+    que calce primero (para que 'GGM_1' no capture erróneamente un archivo
+    'GGM_11...' si existiera, aunque en este catálogo no hay colisión así).
+    Devuelve None si no matchea ninguna tabla conocida."""
+    base = re.sub(r"\.(XLSX|XLS)$", "", nombre_archivo.upper())
+    candidatos = sorted(catalogo, key=len, reverse=True)
+    for tabla in candidatos:
+        tabla_up = tabla.upper()
+        if base == tabla_up or base.startswith(tabla_up + "_") or base.startswith(tabla_up + "-") or base.startswith(tabla_up + " "):
+            return tabla
+    return None
+
+
+def procesar_zip_carpeta(zip_bytes):
+    """Abre el .zip subido, recorre TODOS los archivos .xlsx/.xls (sin
+    importar en qué subcarpeta estén), y arma un diccionario
+    {nombre_tabla: bytes}. Devuelve (archivos, avisos) donde avisos incluye
+    archivos no reconocidos y duplicados (misma tabla encontrada 2+ veces)."""
+    archivos = {}
+    avisos = []
+    duplicados = {}
+    catalogo = _catalogo_completo()
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return {}, ["El archivo subido no es un .zip válido (o está corrupto)."]
+
+    no_reconocidos = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        nombre_completo = info.filename
+        nombre_base = os.path.basename(nombre_completo)
+        if not nombre_base.lower().endswith((".xlsx", ".xls")):
+            continue
+        if nombre_base.startswith("~$"):  # archivo temporal de Excel abierto
+            continue
+        tabla = identificar_tabla_generico(nombre_base, catalogo)
+        if tabla is None:
+            no_reconocidos.append(nombre_completo)
+            continue
+        try:
+            contenido = zf.read(info)
+        except Exception as e:
+            avisos.append(f"No se pudo leer '{nombre_completo}' del zip: {e}")
+            continue
+        if tabla in archivos:
+            duplicados.setdefault(tabla, [nombre_completo]).append(nombre_completo)
+            # Nos quedamos con el que se encontró primero; se avisa el duplicado.
+            continue
+        archivos[tabla] = contenido
+
+    if no_reconocidos:
+        avisos.append(
+            f"{len(no_reconocidos)} archivo(s) dentro del zip no calzaron con ninguna tabla conocida "
+            f"y se ignoraron: {', '.join(no_reconocidos[:10])}" + (", ..." if len(no_reconocidos) > 10 else "")
+        )
+    for tabla, nombres in duplicados.items():
+        avisos.append(
+            f"Se encontró más de un archivo para la tabla {tabla} dentro del zip "
+            f"({', '.join(nombres)}); se usó solo el primero encontrado."
+        )
+
+    return archivos, avisos
+
+
+def checklist_faltantes(archivos, tablas_requeridas):
+    """Devuelve la lista de tablas de 'tablas_requeridas' que NO están en
+    'archivos' (dict {tabla: bytes})."""
+    return [t for t in tablas_requeridas if t not in archivos]
+
+
 # ---------------------------------------------------------------- UI --------
 st.title("Generador REP_2 · Costos y Gastos por Familia de Servicios")
 st.caption(
@@ -2417,48 +2522,111 @@ st.caption(
 
 with st.sidebar:
     st.header("Archivos de entrada")
-    st.caption("Todos los archivos son opcionales: puedes generar REP_2 con lo que tengas disponible.")
-    st.markdown("**GRH — Recursos Humanos**")
-    f_grh8 = st.file_uploader("GRH_8.xlsx", type="xlsx", key="grh8")
-    f_grh11 = st.file_uploader("GRH_11.xlsx", type="xlsx", key="grh11")
-    st.markdown("**GCP — Gastos Generales de Personal**")
-    f_gcp4 = st.file_uploader("GCP_4.xlsx", type="xlsx", key="gcp4")
-    f_gcp5 = st.file_uploader("GCP_5.xlsx", type="xlsx", key="gcp5")
-    st.markdown("**GGV — Vehículos y Equipos**")
-    f_ggv4 = st.file_uploader("GGV_4.xlsx", type="xlsx", key="ggv4")
-    f_ggv5 = st.file_uploader("GGV_5.xlsx", type="xlsx", key="ggv5")
-    st.markdown("**GGI — Bienes Inmuebles**")
-    f_ggi5 = st.file_uploader("GGI_5.xlsx", type="xlsx", key="ggi5")
-    st.markdown("**GGM — Bienes Muebles**")
-    f_ggm1 = st.file_uploader("GGM_1.xlsx", type="xlsx", key="ggm1")
-    f_ggm2 = st.file_uploader("GGM_2.xlsx", type="xlsx", key="ggm2")
-    f_ggm3 = st.file_uploader("GGM_3.xlsx", type="xlsx", key="ggm3")
-    f_ggm4 = st.file_uploader("GGM_4.xlsx", type="xlsx", key="ggm4")
-    f_ggm5 = st.file_uploader("GGM_5.xlsx", type="xlsx", key="ggm5")
-    st.markdown("**OGG — Otros Gastos Generales**")
-    f_ogg5 = st.file_uploader("OGG_5.xlsx", type="xlsx", key="ogg5")
-    st.markdown("**MEI — Materiales e Insumos**")
-    f_mei1 = st.file_uploader("MEI_1.xlsx", type="xlsx", key="mei1")
-    f_mei2 = st.file_uploader("MEI_2.xlsx", type="xlsx", key="mei2")
-    f_mei3 = st.file_uploader("MEI_3.xlsx", type="xlsx", key="mei3")
-    f_mei4 = st.file_uploader("MEI_4.xlsx", type="xlsx", key="mei4")
-    st.markdown("**ST — Servicios Tercerizados (29 tablas)**")
-    st.caption("Sube cualquier subconjunto de ST_3.xlsx a ST_34.xlsx (se identifican por nombre de archivo).")
-    f_st_files = st.file_uploader(
-        "Tablas ST (selección múltiple)", type="xlsx", key="st_files", accept_multiple_files=True
+    st.caption(
+        "Sube UN solo archivo .zip con tu carpeta completa (puede tener "
+        "subcarpetas, ej. una carpeta 'ST' con las tablas ST adentro — no "
+        "importa la estructura, el sistema busca cada tabla por su nombre "
+        "en cualquier parte del zip)."
     )
-    st.markdown("**GPA — Gasto Prestaciones Asociadas**")
-    st.caption("100% del gasto va al servicio regulado fijo de cada tabla (no requiere parametrización).")
-    f_gpa_files = st.file_uploader(
-        "Tablas GPA (selección múltiple, GPA_1 a GPA_6)", type="xlsx", key="gpa_files", accept_multiple_files=True
+    st.caption(
+        "Los nombres pueden tener texto adicional (ej. 'MEI_1_2025.xlsx' o "
+        "'GRH_8 (v2) 2025-07-01.xlsx') — se reconocen igual, mientras "
+        "empiecen con el nombre de la tabla (ej. 'MEI_1', 'GRH_8')."
     )
+    f_zip = st.file_uploader("Carpeta completa (.zip)", type="zip", key="zip_carpeta")
+
+    class _ArchivoZip:
+        """Envoltorio liviano para que el resto del código (que espera un
+        objeto tipo UploadedFile de Streamlit, con .getvalue()/.name) siga
+        funcionando igual, sin importar si el archivo vino de un uploader
+        individual o del zip unificado."""
+        def __init__(self, name, data):
+            self.name = name
+            self._data = data
+        def getvalue(self):
+            return self._data
+
+    if f_zip is not None:
+        if st.session_state.get("_zip_nombre_procesado") != f_zip.name:
+            archivos_zip, avisos_zip = procesar_zip_carpeta(f_zip.getvalue())
+            st.session_state["archivos_zip"] = archivos_zip
+            st.session_state["avisos_zip"] = avisos_zip
+            st.session_state["_zip_nombre_procesado"] = f_zip.name
+
+    archivos_zip = st.session_state.get("archivos_zip", {})
+    avisos_zip = st.session_state.get("avisos_zip", [])
+
+    if archivos_zip:
+        st.success(f"✅ {len(archivos_zip)} tabla(s) reconocida(s) en el zip.")
+        with st.expander("Ver tablas encontradas"):
+            st.write(sorted(archivos_zip.keys()))
+        if avisos_zip:
+            with st.expander(f"⚠️ Avisos de carga del zip ({len(avisos_zip)})", expanded=True):
+                for a in avisos_zip:
+                    st.markdown(f"- {a}")
+
+        st.markdown("**¿Qué falta para cada reporte?**")
+        faltan_rep2 = checklist_faltantes(
+            archivos_zip,
+            ["GRH_8", "GRH_11", "GCP_4", "GCP_5", "GGV_4", "GGV_5", "GGI_5",
+             "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5", "OGG_5",
+             "MEI_1", "MEI_2", "MEI_3", "MEI_4"] + ST_TABLES + GPA_TABLES,
+        )
+        faltan_rep3_extra = checklist_faltantes(archivos_zip, ["GRH_12", "GCP_6", "GGV_6", "GGI_6"])
+        faltan_cyg9 = checklist_faltantes(archivos_zip, ["MCO_42", "ING_4"])
+
+        if faltan_rep2:
+            st.caption(f"Para REP_2 aún faltan: {', '.join(faltan_rep2)}")
+        else:
+            st.caption("✅ REP_2: todas las tablas base están.")
+        if faltan_rep3_extra:
+            st.caption(f"Para REP_3 (además de lo de REP_2) faltan: {', '.join(faltan_rep3_extra)}")
+        else:
+            st.caption("✅ REP_3: tablas de actividad completas.")
+        if faltan_cyg9:
+            st.caption(f"Para CYG_9 (clientes) faltan: {', '.join(faltan_cyg9)}")
+        else:
+            st.caption("✅ CYG_9: MCO_42 e ING_4 están.")
+
     st.markdown("**Plantilla (opcional)**")
     f_template = st.file_uploader("REP_2.xlsx (diccionario)", type="xlsx", key="template")
+
+    def _get(nombre):
+        return _ArchivoZip(f"{nombre}.xlsx", archivos_zip[nombre]) if nombre in archivos_zip else None
+
+    f_grh8 = _get("GRH_8")
+    f_grh11 = _get("GRH_11")
+    f_gcp4 = _get("GCP_4")
+    f_gcp5 = _get("GCP_5")
+    f_ggv4 = _get("GGV_4")
+    f_ggv5 = _get("GGV_5")
+    f_ggi5 = _get("GGI_5")
+    f_ggm1 = _get("GGM_1")
+    f_ggm2 = _get("GGM_2")
+    f_ggm3 = _get("GGM_3")
+    f_ggm4 = _get("GGM_4")
+    f_ggm5 = _get("GGM_5")
+    f_ogg5 = _get("OGG_5")
+    f_mei1 = _get("MEI_1")
+    f_mei2 = _get("MEI_2")
+    f_mei3 = _get("MEI_3")
+    f_mei4 = _get("MEI_4")
+    f_grh12 = _get("GRH_12")
+    f_gcp6 = _get("GCP_6")
+    f_ggv6 = _get("GGV_6")
+    f_ggi6 = _get("GGI_6")
+    f_mco42 = _get("MCO_42")
+    f_ing4 = _get("ING_4")
+
+    f_st_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in ST_TABLES if t in archivos_zip] or None
+    f_gpa_files = [_ArchivoZip(f"{t}.xlsx", archivos_zip[t]) for t in GPA_TABLES if t in archivos_zip] or None
+    f_gpa_files_rep3 = f_gpa_files
 
     archivos_regulares = [f_grh8, f_grh11, f_gcp4, f_gcp5, f_ggv4, f_ggv5, f_ggi5,
                            f_ggm1, f_ggm2, f_ggm3, f_ggm4, f_ggm5, f_ogg5,
                            f_mei1, f_mei2, f_mei3, f_mei4]
     hay_algo_cargado = any(archivos_regulares) or bool(f_st_files) or bool(f_gpa_files)
+
 
 st.markdown(
     """
@@ -3068,19 +3236,17 @@ def panel_parametrizacion_proceso_generico(nombre, recursos_disponibles, session
     return dict(params)
 
 
-with st.expander("📂 Archivos y parametrización para REP_3", expanded=False):
+with st.expander("📂 Parametrización de proceso para REP_3", expanded=False):
     st.caption(
-        "REP_3 reutiliza GRH_8/GRH_11, GCP_5, GGV_4/GGV_5, GGI_5 y las tablas ST "
-        "ya cargadas arriba para REP_2. Aquí solo necesitas subir las tablas de "
-        "apertura por actividad/proceso adicionales."
+        "REP_3 reutiliza automáticamente GRH_8/11/12, GCP_5/6, GGV_4/5/6, GGI_5/6, "
+        "GGM, OGG, MEI, ST y GPA desde el mismo zip cargado arriba en la barra lateral "
+        "— no hace falta volver a subir nada aquí."
     )
-    col1, col2 = st.columns(2)
-    with col1:
-        f_grh12 = st.file_uploader("GRH_12.xlsx", type="xlsx", key="grh12")
-        f_gcp6 = st.file_uploader("GCP_6.xlsx", type="xlsx", key="gcp6")
-    with col2:
-        f_ggv6 = st.file_uploader("GGV_6.xlsx", type="xlsx", key="ggv6")
-        f_ggi6 = st.file_uploader("GGI_6.xlsx", type="xlsx", key="ggi6")
+    faltan_para_rep3 = [t for t in ["GRH_12", "GCP_6", "GGV_6", "GGI_6"] if t not in archivos_zip]
+    if faltan_para_rep3:
+        st.warning(f"Aún faltan en el zip (para la apertura por actividad de REP_3): {', '.join(faltan_para_rep3)}")
+    else:
+        st.success("Todas las tablas de actividad (GRH_12, GCP_6, GGV_6, GGI_6) están cargadas.")
 
     st.markdown("**Parametrización de proceso — GGM y OGG (sin tabla de apertura)**")
     st.caption(
@@ -3114,11 +3280,6 @@ with st.expander("📂 Archivos y parametrización para REP_3", expanded=False):
     )
     gpa_proceso_params = panel_parametrizacion_proceso_generico(
         "GPA (recursos 6101, 6201, 6301, 6401, 6501, 6601)", RECURSOS_GPA_REP3, "gpa_proceso_overrides", {r: 601 for r in [6101, 6201, 6301, 6401, 6501, 6601]}
-    )
-
-    st.markdown("**Tablas GPA para REP_3 (mismas que subiste para REP_2)**")
-    f_gpa_files_rep3 = st.file_uploader(
-        "Tablas GPA (selección múltiple, GPA_1 a GPA_6)", type="xlsx", key="gpa_files_rep3", accept_multiple_files=True
     )
 
 run_rep3 = st.button("Generar REP_3", type="primary")
@@ -3305,15 +3466,19 @@ def build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg):
     return out
 
 
-with st.expander("📂 Archivos adicionales para CYG_9 (MCO_42 + ING_4)", expanded=False):
+with st.expander("📂 Estado de MCO_42 + ING_4 (CYG_9)", expanded=False):
     st.caption(
         "MCO_42 asigna cada servicio no regulado a un ID Ingreso. ING_4 abre "
         "cada ID Ingreso en ID Cliente + monto anual de ingreso. El gasto se "
         "reparte entre clientes proporcionalmente a su ingreso. Si un servicio "
-        "no está cubierto, se declara con ID CLIENTE = '-1' (100%)."
+        "no está cubierto, se declara con ID CLIENTE = '-1' (100%). Ambas se "
+        "toman automáticamente del mismo zip cargado arriba en la barra lateral."
     )
-    f_mco42 = st.file_uploader("MCO_42.xlsx", type="xlsx", key="mco42")
-    f_ing4 = st.file_uploader("ING_4.xlsx", type="xlsx", key="ing4")
+    faltan_mco_ing = [t for t in ["MCO_42", "ING_4"] if t not in archivos_zip]
+    if faltan_mco_ing:
+        st.warning(f"Aún faltan en el zip: {', '.join(faltan_mco_ing)} (mientras tanto, CYG_9 declarará todo bajo ID CLIENTE '-1').")
+    else:
+        st.success("MCO_42 e ING_4 están cargadas.")
 
 run_cyg = st.button("Generar tablas CYG", type="primary")
 
