@@ -2702,8 +2702,87 @@ with st.sidebar:
     hay_algo_cargado = any(archivos_regulares) or bool(f_st_files) or bool(f_gpa_files)
 
 
+# ============================================================================
+# NAVEGACIÓN PRINCIPAL: dos tarjetas grandes (Tablas REP / Tablas CYG)
+# ============================================================================
 st.markdown(
     """
+    <style>
+    div[data-testid="stButton"] button[kind="secondary"].tarjeta-nav {
+        height: 110px;
+        font-size: 20px;
+        font-weight: 600;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _leer_parametrizacion(session_key):
+    """Lee (sin renderizar ningún widget) la parametrización ya guardada en
+    session_state para 'session_key' y la devuelve como {recurso: [(destino, pct), ...]}.
+    Se usa para que CYG pueda usar la parametrización de proceso configurada
+    en la tarjeta 'Tablas REP', incluso cuando esa tarjeta no está visible
+    en este momento (los datos ya quedaron guardados en session_state)."""
+    if session_key not in st.session_state:
+        st.session_state[session_key] = []
+    params = defaultdict(list)
+    for cod_r, cod_destino, pct in st.session_state[session_key]:
+        params[cod_r].append((cod_destino, pct))
+    return dict(params)
+
+
+# Se calculan siempre (sin mostrar widgets) para que estén disponibles sin
+# importar qué tarjeta esté activa; la tarjeta "Tablas REP" además muestra
+# los paneles interactivos para EDITAR estos mismos valores.
+ggm_params = _leer_parametrizacion("ggm_overrides")
+ogg_params = _leer_parametrizacion("ogg_overrides")
+mei_params = _leer_parametrizacion("mei_overrides")
+st_params = _leer_parametrizacion("st_overrides")
+ggm_proceso_params = _leer_parametrizacion("ggm_proceso_overrides")
+ogg_proceso_params = _leer_parametrizacion("ogg_proceso_overrides")
+mei_proceso_params = _leer_parametrizacion("mei_proceso_overrides")
+gpa_proceso_params = _leer_parametrizacion("gpa_proceso_overrides")
+
+if "vista_activa" not in st.session_state:
+    st.session_state["vista_activa"] = None
+
+st.markdown("## ¿Qué quieres generar?")
+col_rep, col_cyg = st.columns(2)
+with col_rep:
+    if st.button(
+        "📊 TABLAS REP\n\nREP_2 + REP_3",
+        key="btn_tarjeta_rep",
+        width='stretch',
+        type="primary" if st.session_state["vista_activa"] == "REP" else "secondary",
+    ):
+        st.session_state["vista_activa"] = "REP"
+        st.rerun()
+with col_cyg:
+    if st.button(
+        "📁 TABLAS CYG\n\nCYG_1 a CYG_9",
+        key="btn_tarjeta_cyg",
+        width='stretch',
+        type="primary" if st.session_state["vista_activa"] == "CYG" else "secondary",
+    ):
+        st.session_state["vista_activa"] = "CYG"
+        st.rerun()
+
+vista_activa = st.session_state["vista_activa"]
+
+if vista_activa is None:
+    st.info(
+        "👆 Elige qué quieres generar: **Tablas REP** (REP_2 y REP_3) o "
+        "**Tablas CYG** (CYG_1 a CYG_9). Puedes cambiar entre ambas cuando quieras "
+        "— lo ya cargado y parametrizado se mantiene."
+    )
+
+st.divider()
+
+if vista_activa == "REP":
+    st.markdown(
+        """
 **Lógica aplicada**
 - **GRH / GGV**: % de dedicación (por persona o por activo) aplicado a los montos de gasto.
 - **GCP / GGI**: ya vienen abiertas por recurso y servicio.
@@ -2717,1077 +2796,1079 @@ st.markdown(
   cargadas. Las familias/recursos sin datos quedan en 0, y se muestra un
   aviso detallado de qué faltó o llegó vacío.
     """
-)
-
-st.subheader("Parametrización opcional — familias sin apertura por servicio")
-st.caption("Por defecto todo el gasto se asigna 100% al servicio regulado 1101.")
-
-with st.expander("Configurar parametrización GGM / OGG / MEI / ST", expanded=False):
-    ggm_params = panel_parametrizacion("GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_overrides")
-    st.divider()
-    ogg_params = panel_parametrizacion("OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_overrides")
-    st.divider()
-    mei_params = panel_parametrizacion("MEI (recursos 4101-4106)", RECURSOS_MEI, "mei_overrides")
-    st.divider()
-    st.caption("ST: algunos códigos son compartidos por varias tablas (ej. 5110 en ST_22 a ST_30); la parametrización se aplica por código de recurso, no por tabla.")
-    st_params = panel_parametrizacion("ST (Servicios Tercerizados)", RECURSOS_ST, "st_overrides")
-
-if "ggm_overrides" not in st.session_state:
-    ggm_params = {}
-if "ogg_overrides" not in st.session_state:
-    ogg_params = {}
-if "mei_overrides" not in st.session_state:
-    mei_params = {}
-if "st_overrides" not in st.session_state:
-    st_params = {}
-
-# Validar overflow > 100%
-def check_overflow(params):
-    return {r: sum(p for _, p in lst) for r, lst in params.items() if sum(p for _, p in lst) > 1.0}
-
-overflow = {}
-overflow.update(check_overflow(ggm_params))
-overflow.update(check_overflow(ogg_params))
-overflow.update(check_overflow(mei_params))
-overflow.update(check_overflow(st_params))
-if overflow:
-    st.error(f"La suma de % parametrizados supera 100% para el(los) recurso(s): {list(overflow.keys())}. Ajusta los valores.")
-
-run = st.button("Generar REP_2", type="primary", disabled=not hay_algo_cargado or bool(overflow))
-
-if not hay_algo_cargado:
-    st.info("Sube al menos un archivo en el panel izquierdo para habilitar la generación (puede ser parcial).")
-
-if run:
-    fb = {
-        "grh8": f_grh8.getvalue() if f_grh8 else None,
-        "grh11": f_grh11.getvalue() if f_grh11 else None,
-        "gcp4": f_gcp4.getvalue() if f_gcp4 else None,
-        "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
-        "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
-        "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
-        "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
-        "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
-        "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
-        "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
-        "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
-        "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
-        "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
-        "mei1": f_mei1.getvalue() if f_mei1 else None,
-        "mei2": f_mei2.getvalue() if f_mei2 else None,
-        "mei3": f_mei3.getvalue() if f_mei3 else None,
-        "mei4": f_mei4.getvalue() if f_mei4 else None,
-    }
-
-    st_files = {}
-    avisos_carga_archivos = []
-    for f in (f_st_files or []):
-        tabla = identificar_tabla_st(f.name)
-        if tabla is None:
-            avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla ST_3..ST_34 conocida; se ignora.")
-            continue
-        try:
-            st_files[tabla] = leer_tabla_st(f.getvalue())
-        except Exception as e:
-            avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
-
-    gpa_files = {}
-    for f in (f_gpa_files or []):
-        tabla = identificar_tabla_gpa(f.name)
-        if tabla is None:
-            avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla GPA_1..GPA_6 conocida; se ignora.")
-            continue
-        try:
-            gpa_files[tabla] = leer_tabla_st(f.getvalue())  # misma lectura robusta por encabezado
-        except Exception as e:
-            avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
-
-    try:
-        final_rows, checks, familia_map, by_recurso_planas, gpa_detalle, avisos = build_rep2(
-            fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_files
-        )
-        avisos = avisos_carga_archivos + avisos
-    except Exception as e:
-        st.error(f"Error procesando los archivos: {e}")
-        st.stop()
-
-    df = pd.DataFrame(final_rows, columns=HEADERS)
-    if len(df) == 0:
-        st.error("No se generó ninguna fila. Revisa que al menos una tabla tenga datos válidos.")
-        st.stop()
-    st.success(f"REP_2 generado con {len(df)} filas.")
-    st.session_state['last_final_rows'] = final_rows
-    st.session_state['last_familia_map'] = familia_map
-    st.session_state['last_by_recurso_planas'] = by_recurso_planas
-    st.session_state['last_gpa_detalle'] = gpa_detalle
-    st.session_state['last_params_by_familia'] = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
-    st.session_state['last_avisos'] = avisos
-
-    if avisos:
-        with st.expander(f"⚠️ Avisos de carga ({len(avisos)})", expanded=True):
-            for aviso in avisos:
-                st.markdown(f"- {aviso}")
-
-    st.subheader("Validación de cuadratura por familia de gasto")
-    st.caption("Solo se muestran las familias con datos cargados.")
-    cols = st.columns(max(len(checks), 1))
-    all_ok = True
-    for col, (fam, chk) in zip(cols, checks.items()):
-        with col:
-            st.markdown(f"**{fam}**")
-            st.metric("Δ GASTO", f"{chk['diff_gasto']:,.1f}")
-            st.metric("Δ ACTIVADO", f"{chk['diff_act']:,.1f}")
-            if abs(chk["diff_gasto"]) > 1 or abs(chk["diff_act"]) > 1:
-                all_ok = False
-                st.warning("Diff > $1")
-            else:
-                st.info("OK")
-
-    if not all_ok:
-        st.warning("Alguna familia presenta una diferencia de cuadratura mayor a $1. Revisa los archivos fuente.")
-
-    st.subheader("Detalle REP_2")
-    st.dataframe(
-        df.style.format({
-            "% NO ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
-            "% ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
-            "GASTO ANUAL": "{:,.0f}",
-            "MONTO ACTIVADO": "{:,.0f}",
-        }),
-        use_container_width=True,
     )
 
-    params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
-    excel_bytes = build_excel(
-        final_rows, familia_map, by_recurso_planas, params_by_familia,
-        gpa_detalle=gpa_detalle,
-        avisos=avisos,
-        template_bytes=f_template.getvalue() if f_template else None,
-    )
-    st.download_button(
-        "Descargar REP_2.xlsx",
-        data=excel_bytes,
-        file_name="REP_2.xlsx",
+    st.subheader("Parametrización opcional — familias sin apertura por servicio")
+    st.caption("Por defecto todo el gasto se asigna 100% al servicio regulado 1101.")
 
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    with st.expander("Configurar parametrización GGM / OGG / MEI / ST", expanded=False):
+        ggm_params = panel_parametrizacion("GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_overrides")
+        st.divider()
+        ogg_params = panel_parametrizacion("OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_overrides")
+        st.divider()
+        mei_params = panel_parametrizacion("MEI (recursos 4101-4106)", RECURSOS_MEI, "mei_overrides")
+        st.divider()
+        st.caption("ST: algunos códigos son compartidos por varias tablas (ej. 5110 en ST_22 a ST_30); la parametrización se aplica por código de recurso, no por tabla.")
+        st_params = panel_parametrizacion("ST (Servicios Tercerizados)", RECURSOS_ST, "st_overrides")
 
-# ============================================================================
-# PANEL DE VISUALIZACIÓN: evolución histórica y detección de anomalías
-# ============================================================================
-st.divider()
-st.header("📊 Panel de Visualización")
-st.caption(
-    "Compara el año actual (generado arriba) contra un libro histórico "
-    "consolidado (ej. REP_2_2020-2024.xlsx) para ver la evolución del gasto "
-    "por Familia de Gasto, Código de Recurso y Familia de Servicio, además "
-    "de detectar variaciones interanuales atípicas."
-)
+    if "ggm_overrides" not in st.session_state:
+        ggm_params = {}
+    if "ogg_overrides" not in st.session_state:
+        ogg_params = {}
+    if "mei_overrides" not in st.session_state:
+        mei_params = {}
+    if "st_overrides" not in st.session_state:
+        st_params = {}
 
-f_historico = st.file_uploader(
-    "Libro histórico consolidado REP_2 (opcional, ej. REP_2_2020-2024.xlsx)",
-    type="xlsx", key="historico_viz"
-)
+    # Validar overflow > 100%
+    def check_overflow(params):
+        return {r: sum(p for _, p in lst) for r, lst in params.items() if sum(p for _, p in lst) > 1.0}
 
+    overflow = {}
+    overflow.update(check_overflow(ggm_params))
+    overflow.update(check_overflow(ogg_params))
+    overflow.update(check_overflow(mei_params))
+    overflow.update(check_overflow(st_params))
+    if overflow:
+        st.error(f"La suma de % parametrizados supera 100% para el(los) recurso(s): {list(overflow.keys())}. Ajusta los valores.")
 
-def cargar_historico(file_bytes):
-    if file_bytes is None:
-        return []
-    wb_h = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    ws_h = wb_h.active
-    return [r for r in ws_h.iter_rows(min_row=2, values_only=True) if r[0] is not None]
+    run = st.button("Generar REP_2", type="primary", disabled=not hay_algo_cargado or bool(overflow))
 
+    if not hay_algo_cargado:
+        st.info("Sube al menos un archivo en el panel izquierdo para habilitar la generación (puede ser parcial).")
 
-def gasto_total_fila(r):
-    # Solo GASTO ANUAL (no activado). No se suma MONTO ACTIVADO.
-    return r[7] or 0
+    if run:
+        fb = {
+            "grh8": f_grh8.getvalue() if f_grh8 else None,
+            "grh11": f_grh11.getvalue() if f_grh11 else None,
+            "gcp4": f_gcp4.getvalue() if f_gcp4 else None,
+            "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
+            "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
+            "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
+            "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
+            "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
+            "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
+            "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
+            "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
+            "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
+            "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
+            "mei1": f_mei1.getvalue() if f_mei1 else None,
+            "mei2": f_mei2.getvalue() if f_mei2 else None,
+            "mei3": f_mei3.getvalue() if f_mei3 else None,
+            "mei4": f_mei4.getvalue() if f_mei4 else None,
+        }
 
-
-def detectar_anomalias(evol_dict, nombre_dim):
-    anomalias = []
-    for key, serie_dict in evol_dict.items():
-        anios_serie = sorted(serie_dict.keys())
-        if len(anios_serie) < 2:
-            continue
-        valores = [serie_dict[a] for a in anios_serie]
-        cambios = []
-        for i in range(1, len(valores)):
-            prev, curr = valores[i - 1], valores[i]
-            pct_cambio = None if prev == 0 else (curr - prev) / prev
-            cambios.append((anios_serie[i], prev, curr, pct_cambio))
-        pct_validos = [c[3] for c in cambios if c[3] is not None]
-        if len(pct_validos) >= 3:
-            media = statistics.mean(pct_validos)
-            desv = statistics.stdev(pct_validos)
-        else:
-            media, desv = None, None
-        for anio_actual, prev, curr, pct_cambio in cambios:
-            if pct_cambio is None:
+        st_files = {}
+        avisos_carga_archivos = []
+        for f in (f_st_files or []):
+            tabla = identificar_tabla_st(f.name)
+            if tabla is None:
+                avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla ST_3..ST_34 conocida; se ignora.")
                 continue
-            es_anomalia = False
-            motivo = ""
-            if desv and desv > 1e-9:
-                z = (pct_cambio - media) / desv
-                if abs(z) > 2:
-                    es_anomalia = True
-                    motivo = f"Variación atípica (z={z:.1f}) vs. patrón histórico"
-            else:
-                if abs(pct_cambio) > 0.5:
-                    es_anomalia = True
-                    motivo = "Variación mayor a 50% (serie corta)"
-            if es_anomalia:
-                anomalias.append({
-                    "Dimensión": nombre_dim, "Grupo": key, "Año": anio_actual,
-                    "Valor Año Anterior": round(prev, 0), "Valor Año Actual": round(curr, 0),
-                    "% Variación": round(pct_cambio, 4), "Motivo": motivo,
-                })
-    return anomalias
+            try:
+                st_files[tabla] = leer_tabla_st(f.getvalue())
+            except Exception as e:
+                avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
 
+        gpa_files = {}
+        for f in (f_gpa_files or []):
+            tabla = identificar_tabla_gpa(f.name)
+            if tabla is None:
+                avisos_carga_archivos.append(f"⚠️ El archivo **{f.name}** no coincide con ninguna tabla GPA_1..GPA_6 conocida; se ignora.")
+                continue
+            try:
+                gpa_files[tabla] = leer_tabla_st(f.getvalue())  # misma lectura robusta por encabezado
+            except Exception as e:
+                avisos_carga_archivos.append(f"⚠️ No se pudo leer **{f.name}** ({tabla}): {e}. Se excluye del cálculo.")
 
-final_rows_actual = st.session_state.get('last_final_rows', [])
-historico_rows = cargar_historico(f_historico.getvalue() if f_historico else None)
-combinado = list(historico_rows) + list(final_rows_actual)
-
-if not combinado:
-    st.info("Genera el REP_2 del año actual arriba y/o sube el libro histórico para ver el panel de visualización.")
-else:
-    anios_disponibles = sorted(set(r[2] for r in combinado))
-
-    evol_familia = defaultdict(lambda: defaultdict(float))
-    evol_recurso = defaultdict(lambda: defaultdict(float))
-    evol_famserv = defaultdict(lambda: defaultdict(float))
-    FAMSERV_NOMBRE = {11: '11 - Servicios Sanitarios (Agua/Alcantarillado)', 12: '12 - Servicios Sanitarios (Otros)', 22: '22 - Servicios No Regulados'}
-
-    for r in combinado:
-        fam = familia_de_recurso(r[4])
-        evol_familia[fam][r[2]] += gasto_total_fila(r)
-        evol_recurso[r[4]][r[2]] += gasto_total_fila(r)
-        evol_famserv[r[5]][r[2]] += gasto_total_fila(r)
-
-    nombre_recurso_map = {cod: f"{cod} - {nombre_recurso(cod)}" for cod in evol_recurso.keys()}
-    famserv_map = {fs: FAMSERV_NOMBRE.get(fs, str(fs)) for fs in evol_famserv.keys()}
-
-    vista = st.radio(
-        "Ver evolución por:",
-        ["Familia de Gasto", "Código de Recurso", "Familia de Servicio"],
-        horizontal=True,
-    )
-
-    if vista == "Familia de Gasto":
-        evol_dict, label_map = evol_familia, {k: k for k in evol_familia}
-    elif vista == "Código de Recurso":
-        evol_dict, label_map = evol_recurso, nombre_recurso_map
-    else:
-        evol_dict, label_map = evol_famserv, famserv_map
-
-    tabla = pd.DataFrame({
-        label_map[k]: [evol_dict[k].get(a, 0) for a in anios_disponibles]
-        for k in evol_dict
-    }, index=anios_disponibles)
-    tabla.index.name = "Año"
-
-    if vista == "Código de Recurso" and len(tabla.columns) > 15:
-        top_cols = tabla.sum(axis=0).sort_values(ascending=False).head(15).index
-        st.caption("Mostrando los 15 códigos de recurso con mayor gasto acumulado (usa la tabla completa para ver el resto).")
-        st.line_chart(tabla[top_cols])
-    else:
-        st.line_chart(tabla)
-
-    with st.expander("Ver tabla de datos"):
-        st.dataframe(tabla.style.format("{:,.0f}"), use_container_width=True)
-
-    # --- Detección de anomalías ---
-    st.subheader("⚠️ Anomalías detectadas (variaciones interanuales atípicas)")
-    anomalias_familia = detectar_anomalias(evol_familia, "Familia de Gasto")
-    anomalias_recurso = detectar_anomalias({nombre_recurso_map[k]: v for k, v in evol_recurso.items()}, "Código de Recurso")
-    anomalias_famserv = detectar_anomalias({famserv_map[k]: v for k, v in evol_famserv.items()}, "Familia de Servicio")
-    todas_anomalias = anomalias_familia + anomalias_recurso + anomalias_famserv
-
-    if todas_anomalias:
-        df_anom = pd.DataFrame(todas_anomalias).sort_values("% Variación", key=lambda s: s.abs(), ascending=False)
-        st.dataframe(
-            df_anom.style.format({
-                "Valor Año Anterior": "{:,.0f}",
-                "Valor Año Actual": "{:,.0f}",
-                "% Variación": "{:+.1%}",
-            }).background_gradient(subset=["% Variación"], cmap="RdYlGn_r"),
-            use_container_width=True,
-        )
-    else:
-        st.success("No se detectaron variaciones interanuales atípicas con los criterios actuales.")
-
-    st.caption(
-        "Criterio: para series con ≥3 variaciones interanuales se usa z-score "
-        "(|z|>2) sobre el propio histórico de cada grupo; para series más "
-        "cortas se marca si la variación supera 50%."
-    )
-
-    # --- Descarga del Excel completo (REP_2 + Panel de Visualización) ------
-    st.divider()
-    if 'last_final_rows' not in st.session_state:
-        st.info("Genera el REP_2 del año actual arriba para poder descargar el Excel con el panel de visualización incluido.")
-    else:
-        if st.button("📥 Preparar Excel con Panel de Visualización (REP_2 + evolución histórica)"):
-            excel_base = build_excel(
-                st.session_state['last_final_rows'],
-                st.session_state['last_familia_map'],
-                st.session_state['last_by_recurso_planas'],
-                st.session_state['last_params_by_familia'],
-                gpa_detalle=st.session_state.get('last_gpa_detalle'),
-                avisos=st.session_state.get('last_avisos'),
-                template_bytes=f_template.getvalue() if 'f_template' in dir() and f_template else None,
+        try:
+            final_rows, checks, familia_map, by_recurso_planas, gpa_detalle, avisos = build_rep2(
+                fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_files
             )
-            wb_completo = openpyxl.load_workbook(excel_base)
+            avisos = avisos_carga_archivos + avisos
+        except Exception as e:
+            st.error(f"Error procesando los archivos: {e}")
+            st.stop()
 
-            header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
-            header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-            data_font = Font(name="Arial", size=10)
-            thin = Side(style="thin", color="D9D9D9")
-            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        df = pd.DataFrame(final_rows, columns=HEADERS)
+        if len(df) == 0:
+            st.error("No se generó ninguna fila. Revisa que al menos una tabla tenga datos válidos.")
+            st.stop()
+        st.success(f"REP_2 generado con {len(df)} filas.")
+        st.session_state['last_final_rows'] = final_rows
+        st.session_state['last_familia_map'] = familia_map
+        st.session_state['last_by_recurso_planas'] = by_recurso_planas
+        st.session_state['last_gpa_detalle'] = gpa_detalle
+        st.session_state['last_params_by_familia'] = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
+        st.session_state['last_avisos'] = avisos
 
-            ws5 = wb_completo.create_sheet("Evolucion_Familia_Gasto")
-            ws5.append(["Familia de Gasto"] + [str(a) for a in anios_disponibles])
-            for c in range(1, len(anios_disponibles) + 2):
-                cell = ws5.cell(row=1, column=c)
-                cell.font = header_font; cell.fill = header_fill; cell.border = border
-                cell.alignment = Alignment(horizontal="center")
-            for fam_k in sorted(evol_familia.keys()):
-                ws5.append([fam_k] + [round(evol_familia[fam_k].get(a, 0), 2) for a in anios_disponibles])
-            for r in range(2, ws5.max_row + 1):
-                for c in range(1, len(anios_disponibles) + 2):
-                    cell = ws5.cell(row=r, column=c)
-                    cell.font = data_font; cell.border = border
-                    if c > 1:
-                        cell.number_format = '#,##0;(#,##0);"-"'
-            ws5.column_dimensions["A"].width = 40
-            for c in range(2, len(anios_disponibles) + 2):
-                ws5.column_dimensions[get_column_letter(c)].width = 16
-            if ws5.max_row > 1 and len(anios_disponibles) > 1:
-                chart1 = LineChart()
-                chart1.title = "Evolución del Gasto por Familia"
-                chart1.y_axis.title = "Gasto Anual ($)"
-                chart1.x_axis.title = "Año"
-                data_ref = Reference(ws5, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws5.max_row)
-                cats_ref = Reference(ws5, min_col=1, min_row=2, max_row=ws5.max_row)
-                chart1.add_data(data_ref, titles_from_data=True)
-                chart1.set_categories(cats_ref)
-                chart1.width = 26; chart1.height = 12
-                ws5.add_chart(chart1, f"A{ws5.max_row + 3}")
+        if avisos:
+            with st.expander(f"⚠️ Avisos de carga ({len(avisos)})", expanded=True):
+                for aviso in avisos:
+                    st.markdown(f"- {aviso}")
 
-            ws6 = wb_completo.create_sheet("Evolucion_Recurso")
-            ws6.append(["Código Recurso", "Nombre Recurso"] + [str(a) for a in anios_disponibles])
-            for c in range(1, len(anios_disponibles) + 3):
-                cell = ws6.cell(row=1, column=c)
-                cell.font = header_font; cell.fill = header_fill; cell.border = border
-                cell.alignment = Alignment(horizontal="center")
-            for cod in sorted(evol_recurso.keys()):
-                ws6.append([cod, nombre_recurso(cod)] + [round(evol_recurso[cod].get(a, 0), 2) for a in anios_disponibles])
-            for r in range(2, ws6.max_row + 1):
-                for c in range(1, len(anios_disponibles) + 3):
-                    cell = ws6.cell(row=r, column=c)
-                    cell.font = data_font; cell.border = border
-                    if c > 2:
-                        cell.number_format = '#,##0;(#,##0);"-"'
-            ws6.column_dimensions["A"].width = 14
-            ws6.column_dimensions["B"].width = 45
-            for c in range(3, len(anios_disponibles) + 3):
-                ws6.column_dimensions[get_column_letter(c)].width = 16
-            ws6.freeze_panes = "C2"
-            if ws6.max_row > 1:
-                ultima_col = len(anios_disponibles) + 2
-                rango = f"{get_column_letter(ultima_col)}2:{get_column_letter(ultima_col)}{ws6.max_row}"
-                ws6.conditional_formatting.add(rango, ColorScaleRule(
-                    start_type="min", start_color="63BE7B",
-                    mid_type="percentile", mid_value=50, mid_color="FFEB84",
-                    end_type="max", end_color="F8696B"))
+        st.subheader("Validación de cuadratura por familia de gasto")
+        st.caption("Solo se muestran las familias con datos cargados.")
+        cols = st.columns(max(len(checks), 1))
+        all_ok = True
+        for col, (fam, chk) in zip(cols, checks.items()):
+            with col:
+                st.markdown(f"**{fam}**")
+                st.metric("Δ GASTO", f"{chk['diff_gasto']:,.1f}")
+                st.metric("Δ ACTIVADO", f"{chk['diff_act']:,.1f}")
+                if abs(chk["diff_gasto"]) > 1 or abs(chk["diff_act"]) > 1:
+                    all_ok = False
+                    st.warning("Diff > $1")
+                else:
+                    st.info("OK")
 
-            ws7 = wb_completo.create_sheet("Evolucion_Familia_Servicio")
-            ws7.append(["Familia de Servicio"] + [str(a) for a in anios_disponibles])
-            for c in range(1, len(anios_disponibles) + 2):
-                cell = ws7.cell(row=1, column=c)
-                cell.font = header_font; cell.fill = header_fill; cell.border = border
-                cell.alignment = Alignment(horizontal="center")
-            for fs in sorted(evol_famserv.keys()):
-                ws7.append([famserv_map[fs]] + [round(evol_famserv[fs].get(a, 0), 2) for a in anios_disponibles])
-            for r in range(2, ws7.max_row + 1):
-                for c in range(1, len(anios_disponibles) + 2):
-                    cell = ws7.cell(row=r, column=c)
-                    cell.font = data_font; cell.border = border
-                    if c > 1:
-                        cell.number_format = '#,##0;(#,##0);"-"'
-            ws7.column_dimensions["A"].width = 42
-            for c in range(2, len(anios_disponibles) + 2):
-                ws7.column_dimensions[get_column_letter(c)].width = 16
-            if ws7.max_row > 1 and len(anios_disponibles) > 1:
-                chart2 = BarChart()
-                chart2.type = "col"; chart2.grouping = "clustered"
-                chart2.title = "Evolución del Gasto por Familia de Servicio"
-                chart2.y_axis.title = "Gasto Anual ($)"
-                chart2.x_axis.title = "Año"
-                data2 = Reference(ws7, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws7.max_row)
-                cats2 = Reference(ws7, min_col=1, min_row=2, max_row=ws7.max_row)
-                chart2.add_data(data2, titles_from_data=True)
-                chart2.set_categories(cats2)
-                chart2.width = 24; chart2.height = 11
-                ws7.add_chart(chart2, f"A{ws7.max_row + 3}")
+        if not all_ok:
+            st.warning("Alguna familia presenta una diferencia de cuadratura mayor a $1. Revisa los archivos fuente.")
 
-            ws8 = wb_completo.create_sheet("Anomalias_Detectadas")
-            ws8.append(["Dimensión", "Grupo", "Año con Anomalía", "Valor Año Anterior", "Valor Año Actual", "% Variación", "Motivo"])
-            for c in range(1, 8):
-                cell = ws8.cell(row=1, column=c)
-                cell.font = header_font; cell.fill = header_fill; cell.border = border
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws8.row_dimensions[1].height = 30
-            if todas_anomalias:
-                for a_row in todas_anomalias:
-                    ws8.append([a_row["Dimensión"], a_row["Grupo"], a_row["Año"], a_row["Valor Año Anterior"],
-                                a_row["Valor Año Actual"], a_row["% Variación"], a_row["Motivo"]])
-            else:
-                ws8.append(["(Sin anomalías detectadas con los criterios actuales)", "", "", "", "", "", ""])
-            for r in range(2, ws8.max_row + 1):
-                for c in range(1, 8):
-                    cell = ws8.cell(row=r, column=c)
-                    cell.font = data_font; cell.border = border
-                    if c in (4, 5):
-                        cell.number_format = '#,##0;(#,##0);"-"'
-                    if c == 6 and isinstance(ws8.cell(row=r, column=6).value, float):
-                        cell.number_format = "+0.00%;-0.00%"
-                        val = ws8.cell(row=r, column=6).value
-                        cell.fill = PatternFill("solid", start_color="FFC7CE" if val > 0 else "C6EFCE",
-                                                 end_color="FFC7CE" if val > 0 else "C6EFCE")
-            ws8.column_dimensions["A"].width = 16
-            ws8.column_dimensions["B"].width = 42
-            ws8.column_dimensions["C"].width = 14
-            ws8.column_dimensions["D"].width = 18
-            ws8.column_dimensions["E"].width = 18
-            ws8.column_dimensions["F"].width = 12
-            ws8.column_dimensions["G"].width = 55
-            ws8.freeze_panes = "A2"
-
-            out_completo = io.BytesIO()
-            wb_completo.save(out_completo)
-            out_completo.seek(0)
-            st.session_state['excel_completo_bytes'] = out_completo.getvalue()
-            st.success("Excel listo. Usa el botón de descarga que apareció abajo.")
-
-        if 'excel_completo_bytes' in st.session_state:
-            st.download_button(
-                "Descargar REP_2 + Panel de Visualización.xlsx",
-                data=st.session_state['excel_completo_bytes'],
-                file_name="REP_2_con_evolucion.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-# ============================================================================
-# GENERADOR REP_3 - Costos y Gastos No Activados de Servicios Regulados - Proceso
-# ============================================================================
-st.divider()
-st.header("📋 Generar REP_3 (apertura por Código de Proceso)")
-st.caption(
-    "REP_3 toma solo el gasto REGULADO de REP_2 (familias 11 y 12) y lo abre "
-    "por Código de Proceso. El Código de Proceso corresponde a los primeros "
-    "3 dígitos del Código Actividad, según MAE_1 del Maestro SISS."
-)
-
-HEADERS_REP3 = [
-    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO",
-    "CÓDIGO SECTOR DECRETO TARIFARIO", "CÓDIGO RECURSO",
-    "CÓDIGO FAMILIA SERVICIOS REGULADOS", "CÓDIGO PROCESO",
-    "% ASIGNADO PROCESO", "GASTO ANUAL",
-]
-
-
-def build_excel_rep3(final_rows3):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "REP_3"
-
-    header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
-    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    data_font = Font(name="Arial", size=10)
-    thin = Side(style="thin", color="D9D9D9")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    ws.append(HEADERS_REP3)
-    for c in range(1, len(HEADERS_REP3) + 1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = border
-    ws.row_dimensions[1].height = 30
-
-    for row in final_rows3:
-        ws.append(row)
-
-    for r in range(2, ws.max_row + 1):
-        for c in range(1, len(HEADERS_REP3) + 1):
-            cell = ws.cell(row=r, column=c)
-            cell.font = data_font
-            cell.border = border
-            if c == 8:
-                cell.number_format = "0.00"
-            elif c == 9:
-                cell.number_format = '#,##0;(#,##0);"-"'
-            else:
-                cell.alignment = Alignment(horizontal="center")
-
-    widths = [14, 16, 14, 20, 14, 24, 14, 16, 18]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    ws.freeze_panes = "A2"
-
-    # Hoja de detalle por proceso (nombre descriptivo)
-    ws2 = wb.create_sheet("Detalle_Procesos")
-    ws2.append(["Código Proceso", "Nombre Proceso", "Gasto Anual Total"])
-    for c in range(1, 4):
-        cell = ws2.cell(row=1, column=c)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.border = border
-    por_proceso = defaultdict(float)
-    for row in final_rows3:
-        por_proceso[row[6]] += row[8]
-    for proceso in sorted(por_proceso.keys()):
-        ws2.append([proceso, nombre_proceso(proceso), round(por_proceso[proceso], 2)])
-    for r in range(2, ws2.max_row + 1):
-        for c in range(1, 4):
-            cell = ws2.cell(row=r, column=c)
-            cell.font = data_font
-            cell.border = border
-            if c == 3:
-                cell.number_format = '#,##0;(#,##0);"-"'
-    ws2.column_dimensions["A"].width = 14
-    ws2.column_dimensions["B"].width = 55
-    ws2.column_dimensions["C"].width = 20
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
-
-
-def panel_parametrizacion_proceso_generico(nombre, recursos_disponibles, session_key, defaults_map):
-    if session_key not in st.session_state:
-        st.session_state[session_key] = []
-    st.markdown(f"**{nombre}**")
-    col1, col2, col3, col4 = st.columns([1.2, 2.5, 1, 0.8])
-    with col1:
-        sel_recurso = st.selectbox("Código Recurso", recursos_disponibles, key=f"sel_recurso_proc_{session_key}")
-    with col2:
-        sel_proceso = st.selectbox(
-            "Proceso destino",
-            options=sorted(PROCESO_NOMBRE.keys()),
-            format_func=lambda c: f"{c} - {PROCESO_NOMBRE[c]}",
-            key=f"sel_proceso_{session_key}",
-        )
-    with col3:
-        sel_pct = st.number_input(
-            "% asignado", min_value=0.0, max_value=100.0, value=10.0,
-            step=0.0000000001, format="%.10f", key=f"sel_pct_proc_{session_key}",
-            help="Puedes ingresar hasta 10 decimales para minimizar la diferencia de redondeo en el monto resultante.",
-        )
-    with col4:
-        st.write("")
-        st.write("")
-        if st.button("Agregar", key=f"add_proc_{session_key}"):
-            st.session_state[session_key].append((sel_recurso, sel_proceso, sel_pct / 100.0))
-    if st.session_state[session_key]:
-        for i, (cod_r, cod_p, pct) in enumerate(st.session_state[session_key]):
-            c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
-            c1.write(cod_r)
-            c2.write(f"{cod_p} - {PROCESO_NOMBRE.get(cod_p, '')}")
-            c3.write(f"{pct:.9%}")
-            if c4.button("Quitar", key=f"del_proc_{session_key}_{i}"):
-                st.session_state[session_key].pop(i)
-                st.rerun()
-    else:
-        default_desc = ", ".join(f"{r}→{p}" for r, p in list(defaults_map.items())[:3])
-        st.caption(f"Sin parametrización: se usa el default (ej. {default_desc}...).")
-    params = defaultdict(list)
-    for cod_r, cod_p, pct in st.session_state[session_key]:
-        params[cod_r].append((cod_p, pct))
-    return dict(params)
-
-
-with st.expander("📂 Parametrización de proceso para REP_3", expanded=False):
-    st.caption(
-        "REP_3 reutiliza automáticamente GRH_8/11/12, GCP_5/6, GGV_4/5/6, GGI_5/6, "
-        "GGM, OGG, MEI, ST y GPA desde el mismo zip cargado arriba en la barra lateral "
-        "— no hace falta volver a subir nada aquí."
-    )
-    faltan_para_rep3 = [t for t in ["GRH_12", "GCP_6", "GGV_6", "GGI_6"] if t not in archivos_zip]
-    if faltan_para_rep3:
-        st.warning(f"Aún faltan (para la apertura por actividad de REP_3): {', '.join(faltan_para_rep3)}")
-    else:
-        st.success("Todas las tablas de actividad (GRH_12, GCP_6, GGV_6, GGI_6) están cargadas.")
-
-    st.markdown("**Parametrización de proceso — GGM y OGG (sin tabla de apertura)**")
-    st.caption(
-        "Por defecto: GGM → Informática (505) para recursos de TI/telecom, "
-        "Abastecimiento y Servicios Generales (504) para materiales; "
-        "OGG → Dirección Superior (501) para gastos de Directorio, "
-        "Administración y Finanzas (502) para el resto. Editable abajo."
-    )
-    ggm_proceso_params = panel_parametrizacion_proceso_generico(
-        "GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_proceso_overrides", DEFAULT_PROCESO_GGM
-    )
-    st.divider()
-    ogg_proceso_params = panel_parametrizacion_proceso_generico(
-        "OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_proceso_overrides", DEFAULT_PROCESO_OGG
-    )
-    st.divider()
-    st.caption(
-        "MEI_1 (Productos químicos, sin actividad): por defecto 70% al proceso "
-        "103 (tratamiento AP) y 30% al proceso 204 (tratamiento AS), en base a "
-        "la distribución real de MEI_2 (Energía Eléctrica) entre esos mismos "
-        "procesos de tratamiento. MEI_2/3/4 ya traen su propio Código Actividad "
-        "y no requieren parametrización."
-    )
-    mei_proceso_params = panel_parametrizacion_proceso_generico(
-        "MEI_1 (recurso 4101)", [4101], "mei_proceso_overrides", DEFAULT_PROCESO_MEI1
-    )
-    st.divider()
-    st.caption(
-        "GPA: por defecto 100% al proceso 601 'Prestaciones Asociadas' (todas "
-        "las tablas GPA corresponden a esa categoría según MAE_1)."
-    )
-    gpa_proceso_params = panel_parametrizacion_proceso_generico(
-        "GPA (recursos 6101, 6201, 6301, 6401, 6501, 6601)", RECURSOS_GPA_REP3, "gpa_proceso_overrides", {r: 601 for r in [6101, 6201, 6301, 6401, 6501, 6601]}
-    )
-
-run_rep3 = st.button("Generar REP_3", type="primary")
-
-if run_rep3:
-    fb3 = {
-        "grh8": f_grh8.getvalue() if f_grh8 else None,
-        "grh11": f_grh11.getvalue() if f_grh11 else None,
-        "grh12": f_grh12.getvalue() if f_grh12 else None,
-        "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
-        "gcp6": f_gcp6.getvalue() if f_gcp6 else None,
-        "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
-        "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
-        "ggv6": f_ggv6.getvalue() if f_ggv6 else None,
-        "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
-        "ggi6": f_ggi6.getvalue() if f_ggi6 else None,
-        "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
-        "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
-        "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
-        "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
-        "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
-        "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
-        "mei1": f_mei1.getvalue() if f_mei1 else None,
-        "mei2": f_mei2.getvalue() if f_mei2 else None,
-        "mei3": f_mei3.getvalue() if f_mei3 else None,
-        "mei4": f_mei4.getvalue() if f_mei4 else None,
-    }
-    st_files_raw = {}
-    for f in (f_st_files or []):
-        tabla = identificar_tabla_st(f.name)
-        if tabla:
-            st_files_raw[tabla] = f.getvalue()
-
-    gpa_files_raw_rep3 = {}
-    for f in (f_gpa_files_rep3 or []):
-        tabla = identificar_tabla_gpa(f.name)
-        if tabla:
-            gpa_files_raw_rep3[tabla] = f.getvalue()
-
-    try:
-        final_rows3, avisos3 = build_rep3(
-            fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_params, st_params, st_files_raw,
-            mei_proceso_params=mei_proceso_params, gpa_proceso_params=gpa_proceso_params,
-            mei_params=mei_params, gpa_files_raw=gpa_files_raw_rep3,
-        )
-    except Exception as e:
-        st.error(f"Error generando REP_3: {e}")
-        st.stop()
-
-    if not final_rows3:
-        st.error("No se generó ninguna fila de REP_3. Verifica que hayas cargado al menos GRH_8+GRH_11+GRH_12, o alguna otra familia con su tabla de proceso.")
-    else:
-        st.success(f"REP_3 generado con {len(final_rows3)} filas.")
-        st.session_state['last_final_rows3'] = final_rows3
-        st.session_state['last_avisos3'] = avisos3
-        if final_rows3:
-            st.session_state['last_epas'] = tuple(final_rows3[0][:4])
-        if avisos3:
-            with st.expander(f"⚠️ Avisos REP_3 ({len(avisos3)})", expanded=True):
-                for a in avisos3:
-                    st.markdown(f"- {a}")
-
-        df3 = pd.DataFrame(final_rows3, columns=HEADERS_REP3)
+        st.subheader("Detalle REP_2")
         st.dataframe(
-            df3.style.format({"% ASIGNADO PROCESO": "{:.2f}%", "GASTO ANUAL": "{:,.0f}"}),
-            use_container_width=True,
+            df.style.format({
+                "% NO ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
+                "% ACTIVADO ASIGNADO FAMILIA SERVICIOS": "{:.2f}%",
+                "GASTO ANUAL": "{:,.0f}",
+                "MONTO ACTIVADO": "{:,.0f}",
+            }),
+            width='stretch',
         )
 
-        excel_rep3 = build_excel_rep3(final_rows3)
+        params_by_familia = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
+        excel_bytes = build_excel(
+            final_rows, familia_map, by_recurso_planas, params_by_familia,
+            gpa_detalle=gpa_detalle,
+            avisos=avisos,
+            template_bytes=f_template.getvalue() if f_template else None,
+        )
         st.download_button(
-            "Descargar REP_3.xlsx",
-            data=excel_rep3,
-            file_name="REP_3.xlsx",
+            "Descargar REP_2.xlsx",
+            data=excel_bytes,
+            file_name="REP_2.xlsx",
+
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# ============================================================================
-# GENERADOR CYG - Costos y Gastos por Recurso (CYG_1-4, CYG_8, CYG_9)
-# ============================================================================
-st.divider()
-st.header("📊 Generar tablas CYG")
-st.caption(
-    "Las tablas CYG (Costos y Gastos por Recurso) se construyen SIEMPRE desde "
-    "las tablas fuente (no desde REP_2/REP_3, que ya colapsan el servicio "
-    "específico y la actividad específica en familia/proceso). REP_2 y REP_3 "
-    "se usan aquí solo como checkpoint de validación de cuadratura."
-)
-st.caption(
-    "CYG_1: servicios 1101/1102 · CYG_2: servicios 1201-1205 · "
-    "CYG_3: servicios no regulados 2101-2117 · CYG_4: servicios no regulados "
-    "2201-2214 · CYG_8: apertura por actividad (solo gasto regulado) · "
-    "CYG_9: servicios no regulados abiertos por ID Cliente (vía MCO_42 + ING_4)."
-)
+    # ============================================================================
+    # PANEL DE VISUALIZACIÓN: evolución histórica y detección de anomalías
+    # ============================================================================
+    st.divider()
+    st.header("📊 Panel de Visualización")
+    st.caption(
+        "Compara el año actual (generado arriba) contra un libro histórico "
+        "consolidado (ej. REP_2_2020-2024.xlsx) para ver la evolución del gasto "
+        "por Familia de Gasto, Código de Recurso y Familia de Servicio, además "
+        "de detectar variaciones interanuales atípicas."
+    )
 
-HEADERS_CYG_SERV = [
-    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
-    "CÓDIGO SERVICIO", "CÓDIGO RECURSO",
-    "% NO ACTIVADO ASIGNADO", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO", "MONTO ACTIVADO",
-]
-HEADERS_CYG_8 = [
-    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
-    "CÓDIGO ACTIVIDAD", "CÓDIGO RECURSO",
-    "% NO ACTIVADO ASIGNADO ACTIVIDAD", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO ACTIVIDAD", "MONTO ACTIVADO",
-]
-HEADERS_CYG_9 = [
-    "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
-    "ID CLIENTE", "CÓDIGO SERVICIO NO REGULADO", "CÓDIGO RECURSO",
-    "% NO ACTIVADO ASIGNADO A CLIENTE", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO A CLIENTE", "MONTO ACTIVADO",
-]
+    f_historico = st.file_uploader(
+        "Libro histórico consolidado REP_2 (opcional, ej. REP_2_2020-2024.xlsx)",
+        type="xlsx", key="historico_viz"
+    )
 
 
-def _agregar_hoja_cyg(wb, nombre_hoja, headers, filas, pct_cols, monto_cols):
-    ws = wb.create_sheet(nombre_hoja)
-    header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
-    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    data_font = Font(name="Arial", size=10)
-    thin = Side(style="thin", color="D9D9D9")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    def cargar_historico(file_bytes):
+        if file_bytes is None:
+            return []
+        wb_h = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws_h = wb_h.active
+        return [r for r in ws_h.iter_rows(min_row=2, values_only=True) if r[0] is not None]
 
-    ws.append(headers)
-    for c in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = border
-    ws.row_dimensions[1].height = 30
 
-    for row in filas:
-        ws.append(row)
+    def gasto_total_fila(r):
+        # Solo GASTO ANUAL (no activado). No se suma MONTO ACTIVADO.
+        return r[7] or 0
 
-    for r in range(2, ws.max_row + 1):
-        for c in range(1, len(headers) + 1):
-            cell = ws.cell(row=r, column=c)
-            cell.font = data_font
-            cell.border = border
-            if c in pct_cols:
-                cell.number_format = "0.00"
-            elif c in monto_cols:
-                cell.number_format = '#,##0;(#,##0);"-"'
+
+    def detectar_anomalias(evol_dict, nombre_dim):
+        anomalias = []
+        for key, serie_dict in evol_dict.items():
+            anios_serie = sorted(serie_dict.keys())
+            if len(anios_serie) < 2:
+                continue
+            valores = [serie_dict[a] for a in anios_serie]
+            cambios = []
+            for i in range(1, len(valores)):
+                prev, curr = valores[i - 1], valores[i]
+                pct_cambio = None if prev == 0 else (curr - prev) / prev
+                cambios.append((anios_serie[i], prev, curr, pct_cambio))
+            pct_validos = [c[3] for c in cambios if c[3] is not None]
+            if len(pct_validos) >= 3:
+                media = statistics.mean(pct_validos)
+                desv = statistics.stdev(pct_validos)
             else:
-                cell.alignment = Alignment(horizontal="center")
-    ws.freeze_panes = "A2"
-    return ws
+                media, desv = None, None
+            for anio_actual, prev, curr, pct_cambio in cambios:
+                if pct_cambio is None:
+                    continue
+                es_anomalia = False
+                motivo = ""
+                if desv and desv > 1e-9:
+                    z = (pct_cambio - media) / desv
+                    if abs(z) > 2:
+                        es_anomalia = True
+                        motivo = f"Variación atípica (z={z:.1f}) vs. patrón histórico"
+                else:
+                    if abs(pct_cambio) > 0.5:
+                        es_anomalia = True
+                        motivo = "Variación mayor a 50% (serie corta)"
+                if es_anomalia:
+                    anomalias.append({
+                        "Dimensión": nombre_dim, "Grupo": key, "Año": anio_actual,
+                        "Valor Año Anterior": round(prev, 0), "Valor Año Actual": round(curr, 0),
+                        "% Variación": round(pct_cambio, 4), "Motivo": motivo,
+                    })
+        return anomalias
 
 
-def build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg):
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+    final_rows_actual = st.session_state.get('last_final_rows', [])
+    historico_rows = cargar_historico(f_historico.getvalue() if f_historico else None)
+    combinado = list(historico_rows) + list(final_rows_actual)
 
-    for nombre in ["CYG_1", "CYG_2", "CYG_3", "CYG_4"]:
-        ws = _agregar_hoja_cyg(wb, nombre, HEADERS_CYG_SERV, cyg14[nombre], pct_cols={7, 9}, monto_cols={8, 10})
-        widths = [14, 16, 14, 20, 14, 14, 16, 18, 16, 18]
+    if not combinado:
+        st.info("Genera el REP_2 del año actual arriba y/o sube el libro histórico para ver el panel de visualización.")
+    else:
+        anios_disponibles = sorted(set(r[2] for r in combinado))
+
+        evol_familia = defaultdict(lambda: defaultdict(float))
+        evol_recurso = defaultdict(lambda: defaultdict(float))
+        evol_famserv = defaultdict(lambda: defaultdict(float))
+        FAMSERV_NOMBRE = {11: '11 - Servicios Sanitarios (Agua/Alcantarillado)', 12: '12 - Servicios Sanitarios (Otros)', 22: '22 - Servicios No Regulados'}
+
+        for r in combinado:
+            fam = familia_de_recurso(r[4])
+            evol_familia[fam][r[2]] += gasto_total_fila(r)
+            evol_recurso[r[4]][r[2]] += gasto_total_fila(r)
+            evol_famserv[r[5]][r[2]] += gasto_total_fila(r)
+
+        nombre_recurso_map = {cod: f"{cod} - {nombre_recurso(cod)}" for cod in evol_recurso.keys()}
+        famserv_map = {fs: FAMSERV_NOMBRE.get(fs, str(fs)) for fs in evol_famserv.keys()}
+
+        vista = st.radio(
+            "Ver evolución por:",
+            ["Familia de Gasto", "Código de Recurso", "Familia de Servicio"],
+            horizontal=True,
+        )
+
+        if vista == "Familia de Gasto":
+            evol_dict, label_map = evol_familia, {k: k for k in evol_familia}
+        elif vista == "Código de Recurso":
+            evol_dict, label_map = evol_recurso, nombre_recurso_map
+        else:
+            evol_dict, label_map = evol_famserv, famserv_map
+
+        tabla = pd.DataFrame({
+            label_map[k]: [evol_dict[k].get(a, 0) for a in anios_disponibles]
+            for k in evol_dict
+        }, index=anios_disponibles)
+        tabla.index.name = "Año"
+
+        if vista == "Código de Recurso" and len(tabla.columns) > 15:
+            top_cols = tabla.sum(axis=0).sort_values(ascending=False).head(15).index
+            st.caption("Mostrando los 15 códigos de recurso con mayor gasto acumulado (usa la tabla completa para ver el resto).")
+            st.line_chart(tabla[top_cols])
+        else:
+            st.line_chart(tabla)
+
+        with st.expander("Ver tabla de datos"):
+            st.dataframe(tabla.style.format("{:,.0f}"), width='stretch')
+
+        # --- Detección de anomalías ---
+        st.subheader("⚠️ Anomalías detectadas (variaciones interanuales atípicas)")
+        anomalias_familia = detectar_anomalias(evol_familia, "Familia de Gasto")
+        anomalias_recurso = detectar_anomalias({nombre_recurso_map[k]: v for k, v in evol_recurso.items()}, "Código de Recurso")
+        anomalias_famserv = detectar_anomalias({famserv_map[k]: v for k, v in evol_famserv.items()}, "Familia de Servicio")
+        todas_anomalias = anomalias_familia + anomalias_recurso + anomalias_famserv
+
+        if todas_anomalias:
+            df_anom = pd.DataFrame(todas_anomalias).sort_values("% Variación", key=lambda s: s.abs(), ascending=False)
+            st.dataframe(
+                df_anom.style.format({
+                    "Valor Año Anterior": "{:,.0f}",
+                    "Valor Año Actual": "{:,.0f}",
+                    "% Variación": "{:+.1%}",
+                }).background_gradient(subset=["% Variación"], cmap="RdYlGn_r"),
+                width='stretch',
+            )
+        else:
+            st.success("No se detectaron variaciones interanuales atípicas con los criterios actuales.")
+
+        st.caption(
+            "Criterio: para series con ≥3 variaciones interanuales se usa z-score "
+            "(|z|>2) sobre el propio histórico de cada grupo; para series más "
+            "cortas se marca si la variación supera 50%."
+        )
+
+        # --- Descarga del Excel completo (REP_2 + Panel de Visualización) ------
+        st.divider()
+        if 'last_final_rows' not in st.session_state:
+            st.info("Genera el REP_2 del año actual arriba para poder descargar el Excel con el panel de visualización incluido.")
+        else:
+            if st.button("📥 Preparar Excel con Panel de Visualización (REP_2 + evolución histórica)"):
+                excel_base = build_excel(
+                    st.session_state['last_final_rows'],
+                    st.session_state['last_familia_map'],
+                    st.session_state['last_by_recurso_planas'],
+                    st.session_state['last_params_by_familia'],
+                    gpa_detalle=st.session_state.get('last_gpa_detalle'),
+                    avisos=st.session_state.get('last_avisos'),
+                    template_bytes=f_template.getvalue() if 'f_template' in dir() and f_template else None,
+                )
+                wb_completo = openpyxl.load_workbook(excel_base)
+
+                header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+                header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+                data_font = Font(name="Arial", size=10)
+                thin = Side(style="thin", color="D9D9D9")
+                border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+                ws5 = wb_completo.create_sheet("Evolucion_Familia_Gasto")
+                ws5.append(["Familia de Gasto"] + [str(a) for a in anios_disponibles])
+                for c in range(1, len(anios_disponibles) + 2):
+                    cell = ws5.cell(row=1, column=c)
+                    cell.font = header_font; cell.fill = header_fill; cell.border = border
+                    cell.alignment = Alignment(horizontal="center")
+                for fam_k in sorted(evol_familia.keys()):
+                    ws5.append([fam_k] + [round(evol_familia[fam_k].get(a, 0), 2) for a in anios_disponibles])
+                for r in range(2, ws5.max_row + 1):
+                    for c in range(1, len(anios_disponibles) + 2):
+                        cell = ws5.cell(row=r, column=c)
+                        cell.font = data_font; cell.border = border
+                        if c > 1:
+                            cell.number_format = '#,##0;(#,##0);"-"'
+                ws5.column_dimensions["A"].width = 40
+                for c in range(2, len(anios_disponibles) + 2):
+                    ws5.column_dimensions[get_column_letter(c)].width = 16
+                if ws5.max_row > 1 and len(anios_disponibles) > 1:
+                    chart1 = LineChart()
+                    chart1.title = "Evolución del Gasto por Familia"
+                    chart1.y_axis.title = "Gasto Anual ($)"
+                    chart1.x_axis.title = "Año"
+                    data_ref = Reference(ws5, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws5.max_row)
+                    cats_ref = Reference(ws5, min_col=1, min_row=2, max_row=ws5.max_row)
+                    chart1.add_data(data_ref, titles_from_data=True)
+                    chart1.set_categories(cats_ref)
+                    chart1.width = 26; chart1.height = 12
+                    ws5.add_chart(chart1, f"A{ws5.max_row + 3}")
+
+                ws6 = wb_completo.create_sheet("Evolucion_Recurso")
+                ws6.append(["Código Recurso", "Nombre Recurso"] + [str(a) for a in anios_disponibles])
+                for c in range(1, len(anios_disponibles) + 3):
+                    cell = ws6.cell(row=1, column=c)
+                    cell.font = header_font; cell.fill = header_fill; cell.border = border
+                    cell.alignment = Alignment(horizontal="center")
+                for cod in sorted(evol_recurso.keys()):
+                    ws6.append([cod, nombre_recurso(cod)] + [round(evol_recurso[cod].get(a, 0), 2) for a in anios_disponibles])
+                for r in range(2, ws6.max_row + 1):
+                    for c in range(1, len(anios_disponibles) + 3):
+                        cell = ws6.cell(row=r, column=c)
+                        cell.font = data_font; cell.border = border
+                        if c > 2:
+                            cell.number_format = '#,##0;(#,##0);"-"'
+                ws6.column_dimensions["A"].width = 14
+                ws6.column_dimensions["B"].width = 45
+                for c in range(3, len(anios_disponibles) + 3):
+                    ws6.column_dimensions[get_column_letter(c)].width = 16
+                ws6.freeze_panes = "C2"
+                if ws6.max_row > 1:
+                    ultima_col = len(anios_disponibles) + 2
+                    rango = f"{get_column_letter(ultima_col)}2:{get_column_letter(ultima_col)}{ws6.max_row}"
+                    ws6.conditional_formatting.add(rango, ColorScaleRule(
+                        start_type="min", start_color="63BE7B",
+                        mid_type="percentile", mid_value=50, mid_color="FFEB84",
+                        end_type="max", end_color="F8696B"))
+
+                ws7 = wb_completo.create_sheet("Evolucion_Familia_Servicio")
+                ws7.append(["Familia de Servicio"] + [str(a) for a in anios_disponibles])
+                for c in range(1, len(anios_disponibles) + 2):
+                    cell = ws7.cell(row=1, column=c)
+                    cell.font = header_font; cell.fill = header_fill; cell.border = border
+                    cell.alignment = Alignment(horizontal="center")
+                for fs in sorted(evol_famserv.keys()):
+                    ws7.append([famserv_map[fs]] + [round(evol_famserv[fs].get(a, 0), 2) for a in anios_disponibles])
+                for r in range(2, ws7.max_row + 1):
+                    for c in range(1, len(anios_disponibles) + 2):
+                        cell = ws7.cell(row=r, column=c)
+                        cell.font = data_font; cell.border = border
+                        if c > 1:
+                            cell.number_format = '#,##0;(#,##0);"-"'
+                ws7.column_dimensions["A"].width = 42
+                for c in range(2, len(anios_disponibles) + 2):
+                    ws7.column_dimensions[get_column_letter(c)].width = 16
+                if ws7.max_row > 1 and len(anios_disponibles) > 1:
+                    chart2 = BarChart()
+                    chart2.type = "col"; chart2.grouping = "clustered"
+                    chart2.title = "Evolución del Gasto por Familia de Servicio"
+                    chart2.y_axis.title = "Gasto Anual ($)"
+                    chart2.x_axis.title = "Año"
+                    data2 = Reference(ws7, min_col=2, max_col=len(anios_disponibles) + 1, min_row=1, max_row=ws7.max_row)
+                    cats2 = Reference(ws7, min_col=1, min_row=2, max_row=ws7.max_row)
+                    chart2.add_data(data2, titles_from_data=True)
+                    chart2.set_categories(cats2)
+                    chart2.width = 24; chart2.height = 11
+                    ws7.add_chart(chart2, f"A{ws7.max_row + 3}")
+
+                ws8 = wb_completo.create_sheet("Anomalias_Detectadas")
+                ws8.append(["Dimensión", "Grupo", "Año con Anomalía", "Valor Año Anterior", "Valor Año Actual", "% Variación", "Motivo"])
+                for c in range(1, 8):
+                    cell = ws8.cell(row=1, column=c)
+                    cell.font = header_font; cell.fill = header_fill; cell.border = border
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws8.row_dimensions[1].height = 30
+                if todas_anomalias:
+                    for a_row in todas_anomalias:
+                        ws8.append([a_row["Dimensión"], a_row["Grupo"], a_row["Año"], a_row["Valor Año Anterior"],
+                                    a_row["Valor Año Actual"], a_row["% Variación"], a_row["Motivo"]])
+                else:
+                    ws8.append(["(Sin anomalías detectadas con los criterios actuales)", "", "", "", "", "", ""])
+                for r in range(2, ws8.max_row + 1):
+                    for c in range(1, 8):
+                        cell = ws8.cell(row=r, column=c)
+                        cell.font = data_font; cell.border = border
+                        if c in (4, 5):
+                            cell.number_format = '#,##0;(#,##0);"-"'
+                        if c == 6 and isinstance(ws8.cell(row=r, column=6).value, float):
+                            cell.number_format = "+0.00%;-0.00%"
+                            val = ws8.cell(row=r, column=6).value
+                            cell.fill = PatternFill("solid", start_color="FFC7CE" if val > 0 else "C6EFCE",
+                                                     end_color="FFC7CE" if val > 0 else "C6EFCE")
+                ws8.column_dimensions["A"].width = 16
+                ws8.column_dimensions["B"].width = 42
+                ws8.column_dimensions["C"].width = 14
+                ws8.column_dimensions["D"].width = 18
+                ws8.column_dimensions["E"].width = 18
+                ws8.column_dimensions["F"].width = 12
+                ws8.column_dimensions["G"].width = 55
+                ws8.freeze_panes = "A2"
+
+                out_completo = io.BytesIO()
+                wb_completo.save(out_completo)
+                out_completo.seek(0)
+                st.session_state['excel_completo_bytes'] = out_completo.getvalue()
+                st.success("Excel listo. Usa el botón de descarga que apareció abajo.")
+
+            if 'excel_completo_bytes' in st.session_state:
+                st.download_button(
+                    "Descargar REP_2 + Panel de Visualización.xlsx",
+                    data=st.session_state['excel_completo_bytes'],
+                    file_name="REP_2_con_evolucion.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+    # ============================================================================
+    # GENERADOR REP_3 - Costos y Gastos No Activados de Servicios Regulados - Proceso
+    # ============================================================================
+    st.divider()
+    st.header("📋 Generar REP_3 (apertura por Código de Proceso)")
+    st.caption(
+        "REP_3 toma solo el gasto REGULADO de REP_2 (familias 11 y 12) y lo abre "
+        "por Código de Proceso. El Código de Proceso corresponde a los primeros "
+        "3 dígitos del Código Actividad, según MAE_1 del Maestro SISS."
+    )
+
+    HEADERS_REP3 = [
+        "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO",
+        "CÓDIGO SECTOR DECRETO TARIFARIO", "CÓDIGO RECURSO",
+        "CÓDIGO FAMILIA SERVICIOS REGULADOS", "CÓDIGO PROCESO",
+        "% ASIGNADO PROCESO", "GASTO ANUAL",
+    ]
+
+
+    def build_excel_rep3(final_rows3):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "REP_3"
+
+        header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+        header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        data_font = Font(name="Arial", size=10)
+        thin = Side(style="thin", color="D9D9D9")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        ws.append(HEADERS_REP3)
+        for c in range(1, len(HEADERS_REP3) + 1):
+            cell = ws.cell(row=1, column=c)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[1].height = 30
+
+        for row in final_rows3:
+            ws.append(row)
+
+        for r in range(2, ws.max_row + 1):
+            for c in range(1, len(HEADERS_REP3) + 1):
+                cell = ws.cell(row=r, column=c)
+                cell.font = data_font
+                cell.border = border
+                if c == 8:
+                    cell.number_format = "0.00"
+                elif c == 9:
+                    cell.number_format = '#,##0;(#,##0);"-"'
+                else:
+                    cell.alignment = Alignment(horizontal="center")
+
+        widths = [14, 16, 14, 20, 14, 24, 14, 16, 18]
         for i, w in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "A2"
 
-    ws8 = _agregar_hoja_cyg(wb, "CYG_8", HEADERS_CYG_8, cyg8, pct_cols={7, 9}, monto_cols={8, 10})
-    widths8 = [14, 16, 14, 20, 14, 14, 20, 18, 20, 18]
-    for i, w in enumerate(widths8, start=1):
-        ws8.column_dimensions[get_column_letter(i)].width = w
+        # Hoja de detalle por proceso (nombre descriptivo)
+        ws2 = wb.create_sheet("Detalle_Procesos")
+        ws2.append(["Código Proceso", "Nombre Proceso", "Gasto Anual Total"])
+        for c in range(1, 4):
+            cell = ws2.cell(row=1, column=c)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        por_proceso = defaultdict(float)
+        for row in final_rows3:
+            por_proceso[row[6]] += row[8]
+        for proceso in sorted(por_proceso.keys()):
+            ws2.append([proceso, nombre_proceso(proceso), round(por_proceso[proceso], 2)])
+        for r in range(2, ws2.max_row + 1):
+            for c in range(1, 4):
+                cell = ws2.cell(row=r, column=c)
+                cell.font = data_font
+                cell.border = border
+                if c == 3:
+                    cell.number_format = '#,##0;(#,##0);"-"'
+        ws2.column_dimensions["A"].width = 14
+        ws2.column_dimensions["B"].width = 55
+        ws2.column_dimensions["C"].width = 20
 
-    ws9 = _agregar_hoja_cyg(wb, "CYG_9", HEADERS_CYG_9, cyg9, pct_cols={8, 10}, monto_cols={9, 11})
-    widths9 = [14, 16, 14, 20, 16, 20, 14, 18, 18, 18, 18]
-    for i, w in enumerate(widths9, start=1):
-        ws9.column_dimensions[get_column_letter(i)].width = w
-
-    if avisos_cyg:
-        wsa = wb.create_sheet("Avisos_CYG")
-        wsa.append(["Aviso"])
-        cell = wsa.cell(row=1, column=1)
-        cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-        cell.fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
-        for a in avisos_cyg:
-            wsa.append([a.replace("**", "")])
-        for r in range(2, wsa.max_row + 1):
-            c = wsa.cell(row=r, column=1)
-            c.font = Font(name="Arial", size=10)
-            c.alignment = Alignment(wrap_text=True, vertical="top")
-        wsa.column_dimensions["A"].width = 110
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
+        out = io.BytesIO()
+        wb.save(out)
+        out.seek(0)
+        return out
 
 
-with st.expander("📂 Estado de MCO_42 + ING_4 (CYG_9)", expanded=False):
-    st.caption(
-        "MCO_42 asigna cada servicio no regulado a un ID Ingreso. ING_4 abre "
-        "cada ID Ingreso en ID Cliente + monto anual de ingreso. El gasto se "
-        "reparte entre clientes proporcionalmente a su ingreso. Si un servicio "
-        "no está cubierto, se declara con ID CLIENTE = '-1' (100%). Ambas se "
-        "toman automáticamente del mismo zip cargado arriba en la barra lateral."
-    )
-    faltan_mco_ing = [t for t in ["MCO_42", "ING_4"] if t not in archivos_zip]
-    if faltan_mco_ing:
-        st.warning(f"Aún faltan: {', '.join(faltan_mco_ing)} (mientras tanto, CYG_9 declarará todo bajo ID CLIENTE '-1').")
-    else:
-        st.success("MCO_42 e ING_4 están cargadas.")
+    def panel_parametrizacion_proceso_generico(nombre, recursos_disponibles, session_key, defaults_map):
+        if session_key not in st.session_state:
+            st.session_state[session_key] = []
+        st.markdown(f"**{nombre}**")
+        col1, col2, col3, col4 = st.columns([1.2, 2.5, 1, 0.8])
+        with col1:
+            sel_recurso = st.selectbox("Código Recurso", recursos_disponibles, key=f"sel_recurso_proc_{session_key}")
+        with col2:
+            sel_proceso = st.selectbox(
+                "Proceso destino",
+                options=sorted(PROCESO_NOMBRE.keys()),
+                format_func=lambda c: f"{c} - {PROCESO_NOMBRE[c]}",
+                key=f"sel_proceso_{session_key}",
+            )
+        with col3:
+            sel_pct = st.number_input(
+                "% asignado", min_value=0.0, max_value=100.0, value=10.0,
+                step=0.0000000001, format="%.10f", key=f"sel_pct_proc_{session_key}",
+                help="Puedes ingresar hasta 10 decimales para minimizar la diferencia de redondeo en el monto resultante.",
+            )
+        with col4:
+            st.write("")
+            st.write("")
+            if st.button("Agregar", key=f"add_proc_{session_key}"):
+                st.session_state[session_key].append((sel_recurso, sel_proceso, sel_pct / 100.0))
+        if st.session_state[session_key]:
+            for i, (cod_r, cod_p, pct) in enumerate(st.session_state[session_key]):
+                c1, c2, c3, c4 = st.columns([1.2, 2.5, 1, 0.8])
+                c1.write(cod_r)
+                c2.write(f"{cod_p} - {PROCESO_NOMBRE.get(cod_p, '')}")
+                c3.write(f"{pct:.9%}")
+                if c4.button("Quitar", key=f"del_proc_{session_key}_{i}"):
+                    st.session_state[session_key].pop(i)
+                    st.rerun()
+        else:
+            default_desc = ", ".join(f"{r}→{p}" for r, p in list(defaults_map.items())[:3])
+            st.caption(f"Sin parametrización: se usa el default (ej. {default_desc}...).")
+        params = defaultdict(list)
+        for cod_r, cod_p, pct in st.session_state[session_key]:
+            params[cod_r].append((cod_p, pct))
+        return dict(params)
 
-run_cyg = st.button("Generar tablas CYG", type="primary")
 
-if run_cyg:
-    fb_cyg = {
-        "grh8": f_grh8.getvalue() if f_grh8 else None,
-        "grh11": f_grh11.getvalue() if f_grh11 else None,
-        "grh12": f_grh12.getvalue() if f_grh12 else None,
-        "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
-        "gcp6": f_gcp6.getvalue() if f_gcp6 else None,
-        "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
-        "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
-        "ggv6": f_ggv6.getvalue() if f_ggv6 else None,
-        "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
-        "ggi6": f_ggi6.getvalue() if f_ggi6 else None,
-        "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
-        "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
-        "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
-        "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
-        "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
-        "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
-        "mei1": f_mei1.getvalue() if f_mei1 else None,
-        "mei2": f_mei2.getvalue() if f_mei2 else None,
-        "mei3": f_mei3.getvalue() if f_mei3 else None,
-        "mei4": f_mei4.getvalue() if f_mei4 else None,
-    }
-    st_files_raw_cyg = {}
-    for f in (f_st_files or []):
-        tabla = identificar_tabla_st(f.name)
-        if tabla:
-            st_files_raw_cyg[tabla] = f.getvalue()
-    gpa_files_raw_cyg = {}
-    for f in (f_gpa_files_rep3 or []):
-        tabla = identificar_tabla_gpa(f.name)
-        if tabla:
-            gpa_files_raw_cyg[tabla] = f.getvalue()
-
-    try:
-        agg_serv, agg_act, avisos_cyg, epas = build_cyg_core(
-            fb_cyg, ggm_params, ogg_params, mei_params, st_params, st_files_raw_cyg,
-            ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
-            gpa_files_raw_cyg,
+    with st.expander("📂 Parametrización de proceso para REP_3", expanded=False):
+        st.caption(
+            "REP_3 reutiliza automáticamente GRH_8/11/12, GCP_5/6, GGV_4/5/6, GGI_5/6, "
+            "GGM, OGG, MEI, ST y GPA desde el mismo zip cargado arriba en la barra lateral "
+            "— no hace falta volver a subir nada aquí."
         )
-    except Exception as e:
-        st.error(f"Error generando CYG: {e}")
-        st.stop()
+        faltan_para_rep3 = [t for t in ["GRH_12", "GCP_6", "GGV_6", "GGI_6"] if t not in archivos_zip]
+        if faltan_para_rep3:
+            st.warning(f"Aún faltan (para la apertura por actividad de REP_3): {', '.join(faltan_para_rep3)}")
+        else:
+            st.success("Todas las tablas de actividad (GRH_12, GCP_6, GGV_6, GGI_6) están cargadas.")
 
-    cyg14 = build_cyg_1_a_4(agg_serv, epas)
-    cyg8 = build_cyg_8(agg_act, epas)
-    cyg9, avisos9 = build_cyg_9(
-        agg_serv,
-        f_mco42.getvalue() if f_mco42 else None,
-        f_ing4.getvalue() if f_ing4 else None,
-        epas,
+        st.markdown("**Parametrización de proceso — GGM y OGG (sin tabla de apertura)**")
+        st.caption(
+            "Por defecto: GGM → Informática (505) para recursos de TI/telecom, "
+            "Abastecimiento y Servicios Generales (504) para materiales; "
+            "OGG → Dirección Superior (501) para gastos de Directorio, "
+            "Administración y Finanzas (502) para el resto. Editable abajo."
+        )
+        ggm_proceso_params = panel_parametrizacion_proceso_generico(
+            "GGM (recursos 2401-2411)", RECURSOS_GGM, "ggm_proceso_overrides", DEFAULT_PROCESO_GGM
+        )
+        st.divider()
+        ogg_proceso_params = panel_parametrizacion_proceso_generico(
+            "OGG (recursos 2501-2550)", RECURSOS_OGG, "ogg_proceso_overrides", DEFAULT_PROCESO_OGG
+        )
+        st.divider()
+        st.caption(
+            "MEI_1 (Productos químicos, sin actividad): por defecto 70% al proceso "
+            "103 (tratamiento AP) y 30% al proceso 204 (tratamiento AS), en base a "
+            "la distribución real de MEI_2 (Energía Eléctrica) entre esos mismos "
+            "procesos de tratamiento. MEI_2/3/4 ya traen su propio Código Actividad "
+            "y no requieren parametrización."
+        )
+        mei_proceso_params = panel_parametrizacion_proceso_generico(
+            "MEI_1 (recurso 4101)", [4101], "mei_proceso_overrides", DEFAULT_PROCESO_MEI1
+        )
+        st.divider()
+        st.caption(
+            "GPA: por defecto 100% al proceso 601 'Prestaciones Asociadas' (todas "
+            "las tablas GPA corresponden a esa categoría según MAE_1)."
+        )
+        gpa_proceso_params = panel_parametrizacion_proceso_generico(
+            "GPA (recursos 6101, 6201, 6301, 6401, 6501, 6601)", RECURSOS_GPA_REP3, "gpa_proceso_overrides", {r: 601 for r in [6101, 6201, 6301, 6401, 6501, 6601]}
+        )
+
+    run_rep3 = st.button("Generar REP_3", type="primary")
+
+    if run_rep3:
+        fb3 = {
+            "grh8": f_grh8.getvalue() if f_grh8 else None,
+            "grh11": f_grh11.getvalue() if f_grh11 else None,
+            "grh12": f_grh12.getvalue() if f_grh12 else None,
+            "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
+            "gcp6": f_gcp6.getvalue() if f_gcp6 else None,
+            "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
+            "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
+            "ggv6": f_ggv6.getvalue() if f_ggv6 else None,
+            "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
+            "ggi6": f_ggi6.getvalue() if f_ggi6 else None,
+            "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
+            "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
+            "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
+            "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
+            "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
+            "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
+            "mei1": f_mei1.getvalue() if f_mei1 else None,
+            "mei2": f_mei2.getvalue() if f_mei2 else None,
+            "mei3": f_mei3.getvalue() if f_mei3 else None,
+            "mei4": f_mei4.getvalue() if f_mei4 else None,
+        }
+        st_files_raw = {}
+        for f in (f_st_files or []):
+            tabla = identificar_tabla_st(f.name)
+            if tabla:
+                st_files_raw[tabla] = f.getvalue()
+
+        gpa_files_raw_rep3 = {}
+        for f in (f_gpa_files_rep3 or []):
+            tabla = identificar_tabla_gpa(f.name)
+            if tabla:
+                gpa_files_raw_rep3[tabla] = f.getvalue()
+
+        try:
+            final_rows3, avisos3 = build_rep3(
+                fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_params, st_params, st_files_raw,
+                mei_proceso_params=mei_proceso_params, gpa_proceso_params=gpa_proceso_params,
+                mei_params=mei_params, gpa_files_raw=gpa_files_raw_rep3,
+            )
+        except Exception as e:
+            st.error(f"Error generando REP_3: {e}")
+            st.stop()
+
+        if not final_rows3:
+            st.error("No se generó ninguna fila de REP_3. Verifica que hayas cargado al menos GRH_8+GRH_11+GRH_12, o alguna otra familia con su tabla de proceso.")
+        else:
+            st.success(f"REP_3 generado con {len(final_rows3)} filas.")
+            st.session_state['last_final_rows3'] = final_rows3
+            st.session_state['last_avisos3'] = avisos3
+            if final_rows3:
+                st.session_state['last_epas'] = tuple(final_rows3[0][:4])
+            if avisos3:
+                with st.expander(f"⚠️ Avisos REP_3 ({len(avisos3)})", expanded=True):
+                    for a in avisos3:
+                        st.markdown(f"- {a}")
+
+            df3 = pd.DataFrame(final_rows3, columns=HEADERS_REP3)
+            st.dataframe(
+                df3.style.format({"% ASIGNADO PROCESO": "{:.2f}%", "GASTO ANUAL": "{:,.0f}"}),
+                width='stretch',
+            )
+
+            excel_rep3 = build_excel_rep3(final_rows3)
+            st.download_button(
+                "Descargar REP_3.xlsx",
+                data=excel_rep3,
+                file_name="REP_3.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+
+if vista_activa == "CYG":
+    # ============================================================================
+    # GENERADOR CYG - Costos y Gastos por Recurso (CYG_1-4, CYG_8, CYG_9)
+    # ============================================================================
+    st.divider()
+    st.header("📊 Generar tablas CYG")
+    st.caption(
+        "Las tablas CYG (Costos y Gastos por Recurso) se construyen SIEMPRE desde "
+        "las tablas fuente (no desde REP_2/REP_3, que ya colapsan el servicio "
+        "específico y la actividad específica en familia/proceso). REP_2 y REP_3 "
+        "se usan aquí solo como checkpoint de validación de cuadratura."
     )
-    avisos_cyg = avisos_cyg + avisos9
+    st.caption(
+        "CYG_1: servicios 1101/1102 · CYG_2: servicios 1201-1205 · "
+        "CYG_3: servicios no regulados 2101-2117 · CYG_4: servicios no regulados "
+        "2201-2214 · CYG_8: apertura por actividad (solo gasto regulado) · "
+        "CYG_9: servicios no regulados abiertos por ID Cliente (vía MCO_42 + ING_4)."
+    )
 
-    total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
-    st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
-    st.session_state['last_cyg14'] = cyg14
-    st.session_state['last_cyg8'] = cyg8
-    st.session_state['last_cyg9'] = cyg9
-    st.session_state['last_avisos_cyg'] = avisos_cyg
-    for nombre, filas in cyg14.items():
-        st.write(f"**{nombre}**: {len(filas)} filas")
-    st.write(f"**CYG_8**: {len(cyg8)} filas")
-    st.write(f"**CYG_9**: {len(cyg9)} filas")
+    HEADERS_CYG_SERV = [
+        "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+        "CÓDIGO SERVICIO", "CÓDIGO RECURSO",
+        "% NO ACTIVADO ASIGNADO", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO", "MONTO ACTIVADO",
+    ]
+    HEADERS_CYG_8 = [
+        "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+        "CÓDIGO ACTIVIDAD", "CÓDIGO RECURSO",
+        "% NO ACTIVADO ASIGNADO ACTIVIDAD", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO ACTIVIDAD", "MONTO ACTIVADO",
+    ]
+    HEADERS_CYG_9 = [
+        "CÓDIGO EMPRESA", "PERÍODO INFORMACIÓN", "AÑO INFORMADO", "CÓDIGO SECTOR DECRETO TARIFARIO",
+        "ID CLIENTE", "CÓDIGO SERVICIO NO REGULADO", "CÓDIGO RECURSO",
+        "% NO ACTIVADO ASIGNADO A CLIENTE", "MONTO NO ACTIVADO", "% ACTIVADO ASIGNADO A CLIENTE", "MONTO ACTIVADO",
+    ]
 
-    if avisos_cyg:
-        with st.expander(f"⚠️ Avisos CYG ({len(avisos_cyg)})", expanded=True):
+
+    def _agregar_hoja_cyg(wb, nombre_hoja, headers, filas, pct_cols, monto_cols):
+        ws = wb.create_sheet(nombre_hoja)
+        header_fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
+        header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        data_font = Font(name="Arial", size=10)
+        thin = Side(style="thin", color="D9D9D9")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        ws.append(headers)
+        for c in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=c)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[1].height = 30
+
+        for row in filas:
+            ws.append(row)
+
+        for r in range(2, ws.max_row + 1):
+            for c in range(1, len(headers) + 1):
+                cell = ws.cell(row=r, column=c)
+                cell.font = data_font
+                cell.border = border
+                if c in pct_cols:
+                    cell.number_format = "0.00"
+                elif c in monto_cols:
+                    cell.number_format = '#,##0;(#,##0);"-"'
+                else:
+                    cell.alignment = Alignment(horizontal="center")
+        ws.freeze_panes = "A2"
+        return ws
+
+
+    def build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg):
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+        for nombre in ["CYG_1", "CYG_2", "CYG_3", "CYG_4"]:
+            ws = _agregar_hoja_cyg(wb, nombre, HEADERS_CYG_SERV, cyg14[nombre], pct_cols={7, 9}, monto_cols={8, 10})
+            widths = [14, 16, 14, 20, 14, 14, 16, 18, 16, 18]
+            for i, w in enumerate(widths, start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+        ws8 = _agregar_hoja_cyg(wb, "CYG_8", HEADERS_CYG_8, cyg8, pct_cols={7, 9}, monto_cols={8, 10})
+        widths8 = [14, 16, 14, 20, 14, 14, 20, 18, 20, 18]
+        for i, w in enumerate(widths8, start=1):
+            ws8.column_dimensions[get_column_letter(i)].width = w
+
+        ws9 = _agregar_hoja_cyg(wb, "CYG_9", HEADERS_CYG_9, cyg9, pct_cols={8, 10}, monto_cols={9, 11})
+        widths9 = [14, 16, 14, 20, 16, 20, 14, 18, 18, 18, 18]
+        for i, w in enumerate(widths9, start=1):
+            ws9.column_dimensions[get_column_letter(i)].width = w
+
+        if avisos_cyg:
+            wsa = wb.create_sheet("Avisos_CYG")
+            wsa.append(["Aviso"])
+            cell = wsa.cell(row=1, column=1)
+            cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+            cell.fill = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
             for a in avisos_cyg:
-                st.markdown(f"- {a}")
+                wsa.append([a.replace("**", "")])
+            for r in range(2, wsa.max_row + 1):
+                c = wsa.cell(row=r, column=1)
+                c.font = Font(name="Arial", size=10)
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+            wsa.column_dimensions["A"].width = 110
 
-    excel_cyg = build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg)
-    st.download_button(
-        "Descargar CYG.xlsx",
-        data=excel_cyg,
-        file_name="CYG.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        out = io.BytesIO()
+        wb.save(out)
+        out.seek(0)
+        return out
 
-# ============================================================================
-# MINUTA DE CRITERIOS DE ASIGNACIÓN (Word, generada dinámicamente)
-# ============================================================================
-def build_minuta_docx(ggm_params, ogg_params, mei_params, st_params,
-                       ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
-                       by_recurso_planas=None, epas=None):
-    """Genera una minuta Word que documenta:
+
+    with st.expander("📂 Estado de MCO_42 + ING_4 (CYG_9)", expanded=False):
+        st.caption(
+            "MCO_42 asigna cada servicio no regulado a un ID Ingreso. ING_4 abre "
+            "cada ID Ingreso en ID Cliente + monto anual de ingreso. El gasto se "
+            "reparte entre clientes proporcionalmente a su ingreso. Si un servicio "
+            "no está cubierto, se declara con ID CLIENTE = '-1' (100%). Ambas se "
+            "toman automáticamente del mismo zip cargado arriba en la barra lateral."
+        )
+        faltan_mco_ing = [t for t in ["MCO_42", "ING_4"] if t not in archivos_zip]
+        if faltan_mco_ing:
+            st.warning(f"Aún faltan: {', '.join(faltan_mco_ing)} (mientras tanto, CYG_9 declarará todo bajo ID CLIENTE '-1').")
+        else:
+            st.success("MCO_42 e ING_4 están cargadas.")
+
+    run_cyg = st.button("Generar tablas CYG", type="primary")
+
+    if run_cyg:
+        fb_cyg = {
+            "grh8": f_grh8.getvalue() if f_grh8 else None,
+            "grh11": f_grh11.getvalue() if f_grh11 else None,
+            "grh12": f_grh12.getvalue() if f_grh12 else None,
+            "gcp5": f_gcp5.getvalue() if f_gcp5 else None,
+            "gcp6": f_gcp6.getvalue() if f_gcp6 else None,
+            "ggv4": f_ggv4.getvalue() if f_ggv4 else None,
+            "ggv5": f_ggv5.getvalue() if f_ggv5 else None,
+            "ggv6": f_ggv6.getvalue() if f_ggv6 else None,
+            "ggi5": f_ggi5.getvalue() if f_ggi5 else None,
+            "ggi6": f_ggi6.getvalue() if f_ggi6 else None,
+            "ggm1": f_ggm1.getvalue() if f_ggm1 else None,
+            "ggm2": f_ggm2.getvalue() if f_ggm2 else None,
+            "ggm3": f_ggm3.getvalue() if f_ggm3 else None,
+            "ggm4": f_ggm4.getvalue() if f_ggm4 else None,
+            "ggm5": f_ggm5.getvalue() if f_ggm5 else None,
+            "ogg5": f_ogg5.getvalue() if f_ogg5 else None,
+            "mei1": f_mei1.getvalue() if f_mei1 else None,
+            "mei2": f_mei2.getvalue() if f_mei2 else None,
+            "mei3": f_mei3.getvalue() if f_mei3 else None,
+            "mei4": f_mei4.getvalue() if f_mei4 else None,
+        }
+        st_files_raw_cyg = {}
+        for f in (f_st_files or []):
+            tabla = identificar_tabla_st(f.name)
+            if tabla:
+                st_files_raw_cyg[tabla] = f.getvalue()
+        gpa_files_raw_cyg = {}
+        for f in (f_gpa_files_rep3 or []):
+            tabla = identificar_tabla_gpa(f.name)
+            if tabla:
+                gpa_files_raw_cyg[tabla] = f.getvalue()
+
+        try:
+            agg_serv, agg_act, avisos_cyg, epas = build_cyg_core(
+                fb_cyg, ggm_params, ogg_params, mei_params, st_params, st_files_raw_cyg,
+                ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+                gpa_files_raw_cyg,
+            )
+        except Exception as e:
+            st.error(f"Error generando CYG: {e}")
+            st.stop()
+
+        cyg14 = build_cyg_1_a_4(agg_serv, epas)
+        cyg8 = build_cyg_8(agg_act, epas)
+        cyg9, avisos9 = build_cyg_9(
+            agg_serv,
+            f_mco42.getvalue() if f_mco42 else None,
+            f_ing4.getvalue() if f_ing4 else None,
+            epas,
+        )
+        avisos_cyg = avisos_cyg + avisos9
+
+        total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
+        st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
+        st.session_state['last_cyg14'] = cyg14
+        st.session_state['last_cyg8'] = cyg8
+        st.session_state['last_cyg9'] = cyg9
+        st.session_state['last_avisos_cyg'] = avisos_cyg
+        for nombre, filas in cyg14.items():
+            st.write(f"**{nombre}**: {len(filas)} filas")
+        st.write(f"**CYG_8**: {len(cyg8)} filas")
+        st.write(f"**CYG_9**: {len(cyg9)} filas")
+
+        if avisos_cyg:
+            with st.expander(f"⚠️ Avisos CYG ({len(avisos_cyg)})", expanded=True):
+                for a in avisos_cyg:
+                    st.markdown(f"- {a}")
+
+        excel_cyg = build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg)
+        st.download_button(
+            "Descargar CYG.xlsx",
+            data=excel_cyg,
+            file_name="CYG.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # ============================================================================
+    # MINUTA DE CRITERIOS DE ASIGNACIÓN (Word, generada dinámicamente)
+    # ============================================================================
+    def build_minuta_docx(ggm_params, ogg_params, mei_params, st_params,
+                           ggm_proceso_params, ogg_proceso_params, mei_proceso_params, gpa_proceso_params,
+                           by_recurso_planas=None, epas=None):
+        """Genera una minuta Word que documenta:
     1. Los criterios de asignación POR DEFECTO usados por el sistema (fijos,
        acordados con la jefatura).
     2. La parametrización ADICIONAL efectivamente ejecutada en ESTA
        generación (dinámica: solo aparece lo que el usuario configuró)."""
-    from docx import Document
-    from docx.shared import Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx import Document
+        from docx.shared import Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    by_recurso_planas = by_recurso_planas or {}
+        by_recurso_planas = by_recurso_planas or {}
 
-    doc = Document()
+        doc = Document()
 
-    title = doc.add_heading("Minuta de Criterios de Asignación de Gasto", level=0)
-    if epas:
-        empresa, periodo, anio, sector = epas
-        p = doc.add_paragraph()
-        p.add_run(f"Empresa {empresa} · Período {periodo} · Año Informado {anio} · Sector {sector}").italic = True
+        title = doc.add_heading("Minuta de Criterios de Asignación de Gasto", level=0)
+        if epas:
+            empresa, periodo, anio, sector = epas
+            p = doc.add_paragraph()
+            p.add_run(f"Empresa {empresa} · Período {periodo} · Año Informado {anio} · Sector {sector}").italic = True
 
-    doc.add_paragraph(
-        "Este documento resume, para la generación de REP_2, REP_3 y las tablas CYG "
-        "correspondientes: (1) los criterios de asignación POR DEFECTO definidos por el "
-        "sistema para las familias sin tabla de apertura propia, y (2) la parametrización "
-        "ADICIONAL que el usuario configuró y ejecutó en esta generación específica, "
-        "desviándose de esos defaults."
-    )
+        doc.add_paragraph(
+            "Este documento resume, para la generación de REP_2, REP_3 y las tablas CYG "
+            "correspondientes: (1) los criterios de asignación POR DEFECTO definidos por el "
+            "sistema para las familias sin tabla de apertura propia, y (2) la parametrización "
+            "ADICIONAL que el usuario configuró y ejecutó en esta generación específica, "
+            "desviándose de esos defaults."
+        )
 
-    # ---------------- SECCIÓN 1: DEFAULTS ----------------
-    doc.add_heading("1. Criterios de Asignación por Defecto", level=1)
+        # ---------------- SECCIÓN 1: DEFAULTS ----------------
+        doc.add_heading("1. Criterios de Asignación por Defecto", level=1)
 
-    doc.add_heading("1.1 Asignación de Servicio (REP_2 / CYG_1-4)", level=2)
-    doc.add_paragraph(
-        "Las familias GGM, OGG, MEI y ST no tienen tabla propia de apertura por servicio. "
-        "Por defecto, el 100% del Gasto Anual de cada recurso se asigna al servicio regulado "
-        "1101. El Monto Activado SIEMPRE se mantiene 100% en el servicio 1101, "
-        "independiente de cualquier parametrización de servicio no regulado."
-    )
-    doc.add_paragraph(
-        "GPA tiene un servicio FIJO por tabla (no configurable): GPA_1→1201, GPA_2→1202, "
-        "GPA_3→1203, GPA_4→1204, GPA_5→1205, GPA_6→1201."
-    )
+        doc.add_heading("1.1 Asignación de Servicio (REP_2 / CYG_1-4)", level=2)
+        doc.add_paragraph(
+            "Las familias GGM, OGG, MEI y ST no tienen tabla propia de apertura por servicio. "
+            "Por defecto, el 100% del Gasto Anual de cada recurso se asigna al servicio regulado "
+            "1101. El Monto Activado SIEMPRE se mantiene 100% en el servicio 1101, "
+            "independiente de cualquier parametrización de servicio no regulado."
+        )
+        doc.add_paragraph(
+            "GPA tiene un servicio FIJO por tabla (no configurable): GPA_1→1201, GPA_2→1202, "
+            "GPA_3→1203, GPA_4→1204, GPA_5→1205, GPA_6→1201."
+        )
 
-    doc.add_heading("1.2 Asignación de Proceso / Actividad (REP_3 / CYG_8)", level=2)
-    tabla_defaults = doc.add_table(rows=1, cols=3)
-    tabla_defaults.style = "Light Grid Accent 1"
-    hdr = tabla_defaults.rows[0].cells
-    hdr[0].text, hdr[1].text, hdr[2].text = "Familia / Recurso", "Asignación por defecto", "Justificación"
-    filas_default = [
-        ("GGI (todos los recursos)", "Reparto equitativo entre las 21 actividades del proceso 504", "Sin tabla de actividad propia"),
-        ("GGM 2401-2409 (TI/telecom)", "100% → proceso 505 Informática", "Naturaleza informática/telecom del gasto"),
-        ("GGM 2410-2411 (materiales)", "100% → proceso 504 Abastecimiento", "Materiales de compra/abastecimiento general"),
-        ("OGG 2501-2502 (Directorio)", "100% → proceso 501 Dirección Superior", "Gasto de gobierno corporativo"),
-        ("OGG resto", "100% → proceso 502 Admin. y Finanzas", "Naturaleza administrativa/financiera general"),
-        ("MEI_1 (4101, Q. Químicos)", "Proceso/actividad EXACTA vía tabla OBRA_TIPO_NBI", "Mapeo determinístico entregado por la jefatura"),
-        ("GPA (todas las tablas)", "Reparto equitativo dentro del subproceso propio (proceso 601)", "Cada tabla = una prestación asociada específica"),
-    ]
-    for f, a, j in filas_default:
-        row = tabla_defaults.add_row().cells
-        row[0].text, row[1].text, row[2].text = f, a, j
+        doc.add_heading("1.2 Asignación de Proceso / Actividad (REP_3 / CYG_8)", level=2)
+        tabla_defaults = doc.add_table(rows=1, cols=3)
+        tabla_defaults.style = "Light Grid Accent 1"
+        hdr = tabla_defaults.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text = "Familia / Recurso", "Asignación por defecto", "Justificación"
+        filas_default = [
+            ("GGI (todos los recursos)", "Reparto equitativo entre las 21 actividades del proceso 504", "Sin tabla de actividad propia"),
+            ("GGM 2401-2409 (TI/telecom)", "100% → proceso 505 Informática", "Naturaleza informática/telecom del gasto"),
+            ("GGM 2410-2411 (materiales)", "100% → proceso 504 Abastecimiento", "Materiales de compra/abastecimiento general"),
+            ("OGG 2501-2502 (Directorio)", "100% → proceso 501 Dirección Superior", "Gasto de gobierno corporativo"),
+            ("OGG resto", "100% → proceso 502 Admin. y Finanzas", "Naturaleza administrativa/financiera general"),
+            ("MEI_1 (4101, Q. Químicos)", "Proceso/actividad EXACTA vía tabla OBRA_TIPO_NBI", "Mapeo determinístico entregado por la jefatura"),
+            ("GPA (todas las tablas)", "Reparto equitativo dentro del subproceso propio (proceso 601)", "Cada tabla = una prestación asociada específica"),
+        ]
+        for f, a, j in filas_default:
+            row = tabla_defaults.add_row().cells
+            row[0].text, row[1].text, row[2].text = f, a, j
 
-    # ---------------- SECCIÓN 2: PARAMETRIZACIÓN EJECUTADA ----------------
-    doc.add_heading("2. Parametrización Adicional Ejecutada en esta Generación", level=1)
+        # ---------------- SECCIÓN 2: PARAMETRIZACIÓN EJECUTADA ----------------
+        doc.add_heading("2. Parametrización Adicional Ejecutada en esta Generación", level=1)
 
-    def _nombre_servicio(cod):
-        return SERVICIOS_NO_REGULADOS.get(cod, f"Servicio {cod}")
+        def _nombre_servicio(cod):
+            return SERVICIOS_NO_REGULADOS.get(cod, f"Servicio {cod}")
 
-    hubo_parametrizacion = False
+        hubo_parametrizacion = False
 
-    doc.add_heading("2.1 Reasignación de Servicio (desvío desde el servicio regulado 1101)", level=2)
-    params_servicio = [("GGM", ggm_params), ("OGG", ogg_params), ("MEI", mei_params), ("ST", st_params)]
-    filas_serv = []
-    for nombre_familia, params in params_servicio:
-        recurso_totales = by_recurso_planas.get(nombre_familia, {})
-        for cod_recurso, overrides in params.items():
-            if not overrides:
-                continue
-            total_original = recurso_totales.get(cod_recurso, [0.0, 0.0])[0]
-            for cod_serv_destino, pct in overrides:
-                monto = total_original * pct
-                filas_serv.append((nombre_familia, cod_recurso, cod_serv_destino, _nombre_servicio(cod_serv_destino), pct, monto))
+        doc.add_heading("2.1 Reasignación de Servicio (desvío desde el servicio regulado 1101)", level=2)
+        params_servicio = [("GGM", ggm_params), ("OGG", ogg_params), ("MEI", mei_params), ("ST", st_params)]
+        filas_serv = []
+        for nombre_familia, params in params_servicio:
+            recurso_totales = by_recurso_planas.get(nombre_familia, {})
+            for cod_recurso, overrides in params.items():
+                if not overrides:
+                    continue
+                total_original = recurso_totales.get(cod_recurso, [0.0, 0.0])[0]
+                for cod_serv_destino, pct in overrides:
+                    monto = total_original * pct
+                    filas_serv.append((nombre_familia, cod_recurso, cod_serv_destino, _nombre_servicio(cod_serv_destino), pct, monto))
 
-    if filas_serv:
-        hubo_parametrizacion = True
-        tabla_serv = doc.add_table(rows=1, cols=6)
-        tabla_serv.style = "Light Grid Accent 1"
-        hdr = tabla_serv.rows[0].cells
-        for i, h in enumerate(["Familia", "Recurso", "Servicio Destino", "Nombre Servicio", "%", "Monto Estimado ($)"]):
-            hdr[i].text = h
-        for fam, rec, serv, nombre_s, pct, monto in filas_serv:
-            row = tabla_serv.add_row().cells
-            row[0].text = fam
-            row[1].text = str(rec)
-            row[2].text = str(serv)
-            row[3].text = nombre_s
-            row[4].text = f"{pct*100:.6f}%"
-            row[5].text = f"{monto:,.0f}"
-    else:
-        doc.add_paragraph("No se configuró ninguna reasignación de servicio en esta generación; se utilizó el default (100% servicio 1101) para todos los recursos de estas familias.")
+        if filas_serv:
+            hubo_parametrizacion = True
+            tabla_serv = doc.add_table(rows=1, cols=6)
+            tabla_serv.style = "Light Grid Accent 1"
+            hdr = tabla_serv.rows[0].cells
+            for i, h in enumerate(["Familia", "Recurso", "Servicio Destino", "Nombre Servicio", "%", "Monto Estimado ($)"]):
+                hdr[i].text = h
+            for fam, rec, serv, nombre_s, pct, monto in filas_serv:
+                row = tabla_serv.add_row().cells
+                row[0].text = fam
+                row[1].text = str(rec)
+                row[2].text = str(serv)
+                row[3].text = nombre_s
+                row[4].text = f"{pct*100:.6f}%"
+                row[5].text = f"{monto:,.0f}"
+        else:
+            doc.add_paragraph("No se configuró ninguna reasignación de servicio en esta generación; se utilizó el default (100% servicio 1101) para todos los recursos de estas familias.")
 
-    doc.add_heading("2.2 Reasignación de Proceso (desvío desde el proceso/actividad por defecto)", level=2)
-    params_proceso = [("GGM", ggm_proceso_params), ("OGG", ogg_proceso_params), ("MEI_1", mei_proceso_params), ("GPA", gpa_proceso_params)]
-    filas_proc = []
-    for nombre_familia, params in params_proceso:
-        for cod_recurso, overrides in params.items():
-            if not overrides:
-                continue
-            for cod_proceso_destino, pct in overrides:
-                filas_proc.append((nombre_familia, cod_recurso, cod_proceso_destino, nombre_proceso(cod_proceso_destino), pct))
+        doc.add_heading("2.2 Reasignación de Proceso (desvío desde el proceso/actividad por defecto)", level=2)
+        params_proceso = [("GGM", ggm_proceso_params), ("OGG", ogg_proceso_params), ("MEI_1", mei_proceso_params), ("GPA", gpa_proceso_params)]
+        filas_proc = []
+        for nombre_familia, params in params_proceso:
+            for cod_recurso, overrides in params.items():
+                if not overrides:
+                    continue
+                for cod_proceso_destino, pct in overrides:
+                    filas_proc.append((nombre_familia, cod_recurso, cod_proceso_destino, nombre_proceso(cod_proceso_destino), pct))
 
-    if filas_proc:
-        hubo_parametrizacion = True
-        tabla_proc = doc.add_table(rows=1, cols=5)
-        tabla_proc.style = "Light Grid Accent 1"
-        hdr = tabla_proc.rows[0].cells
-        for i, h in enumerate(["Familia", "Recurso", "Proceso Destino", "Nombre Proceso", "%"]):
-            hdr[i].text = h
-        for fam, rec, proc, nombre_p, pct in filas_proc:
-            row = tabla_proc.add_row().cells
-            row[0].text = fam
-            row[1].text = str(rec)
-            row[2].text = str(proc)
-            row[3].text = nombre_p
-            row[4].text = f"{pct*100:.6f}%"
-    else:
-        doc.add_paragraph("No se configuró ninguna reasignación de proceso en esta generación; se utilizaron los defaults de la sección 1.2 para todos los recursos de estas familias.")
+        if filas_proc:
+            hubo_parametrizacion = True
+            tabla_proc = doc.add_table(rows=1, cols=5)
+            tabla_proc.style = "Light Grid Accent 1"
+            hdr = tabla_proc.rows[0].cells
+            for i, h in enumerate(["Familia", "Recurso", "Proceso Destino", "Nombre Proceso", "%"]):
+                hdr[i].text = h
+            for fam, rec, proc, nombre_p, pct in filas_proc:
+                row = tabla_proc.add_row().cells
+                row[0].text = fam
+                row[1].text = str(rec)
+                row[2].text = str(proc)
+                row[3].text = nombre_p
+                row[4].text = f"{pct*100:.6f}%"
+        else:
+            doc.add_paragraph("No se configuró ninguna reasignación de proceso en esta generación; se utilizaron los defaults de la sección 1.2 para todos los recursos de estas familias.")
 
-    doc.add_paragraph()
-    nota = doc.add_paragraph()
-    nota.add_run(
-        "Nota: esta minuta refleja el estado de la parametrización EN EL MOMENTO de generar "
-        "este documento. Si se modifica la parametrización y se vuelve a generar REP_2/REP_3/CYG, "
-        "debe volver a generarse esta minuta para que quede actualizada."
-    ).italic = True
+        doc.add_paragraph()
+        nota = doc.add_paragraph()
+        nota.add_run(
+            "Nota: esta minuta refleja el estado de la parametrización EN EL MOMENTO de generar "
+            "este documento. Si se modifica la parametrización y se vuelve a generar REP_2/REP_3/CYG, "
+            "debe volver a generarse esta minuta para que quede actualizada."
+        ).italic = True
 
-    # Corrige un detalle de settings.xml (atributo 'percent' del zoom) que
-    # python-docx a veces omite; Word lo tolera pero validadores XSD lo marcan.
-    try:
-        settings = doc.settings.element
-        for zoom in settings.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}zoom"):
-            if zoom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent") is None:
-                zoom.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent", "100")
-    except Exception:
-        pass
+        # Corrige un detalle de settings.xml (atributo 'percent' del zoom) que
+        # python-docx a veces omite; Word lo tolera pero validadores XSD lo marcan.
+        try:
+            settings = doc.settings.element
+            for zoom in settings.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}zoom"):
+                if zoom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent") is None:
+                    zoom.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}percent", "100")
+        except Exception:
+            pass
 
-    out = io.BytesIO()
-    doc.save(out)
-    out.seek(0)
-    return out
+        out = io.BytesIO()
+        doc.save(out)
+        out.seek(0)
+        return out
 
 
 st.divider()
