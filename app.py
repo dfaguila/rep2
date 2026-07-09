@@ -2613,6 +2613,22 @@ modo_jefatura = st.sidebar.toggle(
          "generación, solo el resumen y la validación de lo ya generado en esta sesión.",
 )
 
+sufijo_archivo = st.sidebar.text_input(
+    "Sufijo para nombres de archivo (opcional)",
+    value="",
+    placeholder="_v09.07.26",
+    help="Se agrega al final del nombre de cada archivo que descargues "
+         "(ej. 'REP_2_v09.07.26.xlsx'). Déjalo vacío para usar el nombre por defecto.",
+    key="sufijo_archivo",
+)
+
+
+def nombre_con_sufijo(nombre_base, extension):
+    """Arma el nombre final de archivo para descarga, insertando el sufijo
+    configurado por el usuario (si lo hay) ANTES de la extensión."""
+    return f"{nombre_base}{sufijo_archivo}.{extension}"
+
+
 if modo_jefatura:
     st.title("📊 Resumen Ejecutivo — REP_2 / REP_3 / CYG")
     st.caption(
@@ -2665,7 +2681,7 @@ if modo_jefatura:
             st.download_button(
                 "📄 Descargar Minuta de Criterios de Asignación",
                 data=st.session_state["minuta_bytes"],
-                file_name="Minuta_Parametrizacion.docx",
+                file_name=nombre_con_sufijo("Minuta_Parametrizacion", "docx"),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
     st.stop()
@@ -3135,7 +3151,7 @@ if vista_activa == "REP":
         st.download_button(
             "Descargar REP_2.xlsx",
             data=excel_bytes,
-            file_name="REP_2.xlsx",
+            file_name=nombre_con_sufijo("REP_2", "xlsx"),
 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
@@ -3442,7 +3458,7 @@ if vista_activa == "REP":
                 st.download_button(
                     "Descargar REP_2 + Panel de Visualización.xlsx",
                     data=st.session_state['excel_completo_bytes'],
-                    file_name="REP_2_con_evolucion.xlsx",
+                    file_name=nombre_con_sufijo("REP_2_con_evolucion", "xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
@@ -3696,7 +3712,7 @@ if vista_activa == "REP":
             st.download_button(
                 "Descargar REP_3.xlsx",
                 data=excel_rep3,
-                file_name="REP_3.xlsx",
+                file_name=nombre_con_sufijo("REP_3", "xlsx"),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -3899,11 +3915,50 @@ if vista_activa == "CYG":
                 for a in avisos_cyg:
                     st.markdown(f"- {a}")
 
+        def build_excel_cyg_individual(nombre_hoja, headers, filas, pct_cols, monto_cols, widths):
+            """Arma un libro Excel con UNA sola tabla CYG (para descargar y
+            enviar cada tabla por separado, en vez del libro combinado)."""
+            wb_ind = openpyxl.Workbook()
+            wb_ind.remove(wb_ind.active)
+            ws_ind = _agregar_hoja_cyg(wb_ind, nombre_hoja, headers, filas, pct_cols=pct_cols, monto_cols=monto_cols)
+            for i, w in enumerate(widths, start=1):
+                ws_ind.column_dimensions[get_column_letter(i)].width = w
+            out_ind = io.BytesIO()
+            wb_ind.save(out_ind)
+            out_ind.seek(0)
+            return out_ind
+
+        st.markdown("**Descargar cada tabla por separado**")
+        cols_cyg_dl = st.columns(3)
+        widths_serv = [14, 16, 14, 20, 14, 14, 16, 18, 16, 18]
+        widths8 = [14, 16, 14, 20, 14, 14, 20, 18, 20, 18]
+        widths9 = [14, 16, 14, 20, 16, 20, 14, 18, 18, 18, 18]
+        tablas_individuales = [
+            ("CYG_1", HEADERS_CYG_SERV, cyg14["CYG_1"], {7, 9}, {8, 10}, widths_serv),
+            ("CYG_2", HEADERS_CYG_SERV, cyg14["CYG_2"], {7, 9}, {8, 10}, widths_serv),
+            ("CYG_3", HEADERS_CYG_SERV, cyg14["CYG_3"], {7, 9}, {8, 10}, widths_serv),
+            ("CYG_4", HEADERS_CYG_SERV, cyg14["CYG_4"], {7, 9}, {8, 10}, widths_serv),
+            ("CYG_8", HEADERS_CYG_8, cyg8, {7, 9}, {8, 10}, widths8),
+            ("CYG_9", HEADERS_CYG_9, cyg9, {8, 10}, {9, 11}, widths9),
+        ]
+        for i, (nombre_tabla, headers_t, filas_t, pct_t, monto_t, widths_t) in enumerate(tablas_individuales):
+            excel_individual = build_excel_cyg_individual(nombre_tabla, headers_t, filas_t, pct_t, monto_t, widths_t)
+            with cols_cyg_dl[i % 3]:
+                st.download_button(
+                    f"📄 {nombre_tabla}.xlsx",
+                    data=excel_individual,
+                    file_name=nombre_con_sufijo(nombre_tabla, "xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_individual_{nombre_tabla}",
+                    width="stretch",
+                )
+
+        st.markdown("**O descargar todo junto en un solo libro**")
         excel_cyg = build_excel_cyg(cyg14, cyg8, cyg9, avisos_cyg)
         st.download_button(
-            "Descargar CYG.xlsx",
+            "Descargar CYG_completo.xlsx (las 6 tablas + avisos)",
             data=excel_cyg,
-            file_name="CYG.xlsx",
+            file_name=nombre_con_sufijo("CYG_completo", "xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -4087,7 +4142,7 @@ if 'minuta_bytes' in st.session_state:
     st.download_button(
         "Descargar Minuta_Parametrizacion.docx",
         data=st.session_state['minuta_bytes'],
-        file_name="Minuta_Parametrizacion.docx",
+        file_name=nombre_con_sufijo("Minuta_Parametrizacion", "docx"),
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
