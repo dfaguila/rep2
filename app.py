@@ -3098,7 +3098,6 @@ if vista_activa == "REP":
             st.error("No se generó ninguna fila. Revisa que al menos una tabla tenga datos válidos.")
             st.stop()
         st.success(f"REP_2 generado con {len(df)} filas.")
-        mostrar_kpis_rep2(final_rows, avisos)
         mostrar_comparacion_anterior("diff_prev_rep2", final_rows, idx_agrupacion=(4, 5), idx_valor=7, etiqueta_grupo="(Recurso, Familia)")
         st.session_state['last_final_rows'] = final_rows
         st.session_state['last_familia_map'] = familia_map
@@ -3106,6 +3105,17 @@ if vista_activa == "REP":
         st.session_state['last_gpa_detalle'] = gpa_detalle
         st.session_state['last_params_by_familia'] = {"GGM": ggm_params, "OGG": ogg_params, "MEI": mei_params, "ST": st_params}
         st.session_state['last_avisos'] = avisos
+        st.session_state['last_checks'] = checks
+
+    if 'last_final_rows' in st.session_state:
+        final_rows = st.session_state['last_final_rows']
+        familia_map = st.session_state['last_familia_map']
+        by_recurso_planas = st.session_state['last_by_recurso_planas']
+        gpa_detalle = st.session_state['last_gpa_detalle']
+        avisos = st.session_state['last_avisos']
+        checks = st.session_state['last_checks']
+        df = pd.DataFrame(final_rows, columns=HEADERS)
+        mostrar_kpis_rep2(final_rows, avisos)
 
         if avisos:
             with st.expander(f"⚠️ Avisos de carga ({len(avisos)})", expanded=True):
@@ -3690,31 +3700,35 @@ if vista_activa == "REP":
         if not final_rows3:
             st.error("No se generó ninguna fila de REP_3. Verifica que hayas cargado al menos GRH_8+GRH_11+GRH_12, o alguna otra familia con su tabla de proceso.")
         else:
-            st.success(f"REP_3 generado con {len(final_rows3)} filas.")
-            mostrar_kpis_rep3(final_rows3, avisos3)
             mostrar_comparacion_anterior("diff_prev_rep3", final_rows3, idx_agrupacion=(4, 5, 6), idx_valor=8, etiqueta_grupo="(Recurso, Familia, Proceso)")
             st.session_state['last_final_rows3'] = final_rows3
             st.session_state['last_avisos3'] = avisos3
-            if final_rows3:
-                st.session_state['last_epas'] = tuple(final_rows3[0][:4])
-            if avisos3:
-                with st.expander(f"⚠️ Avisos REP_3 ({len(avisos3)})", expanded=True):
-                    for a in avisos3:
-                        st.markdown(f"- {a}")
+            st.session_state['last_epas'] = tuple(final_rows3[0][:4])
 
-            df3 = pd.DataFrame(final_rows3, columns=HEADERS_REP3)
-            st.dataframe(
-                df3.style.format({"% ASIGNADO PROCESO": "{:.2f}%", "GASTO ANUAL": "{:,.0f}"}),
-                width='stretch',
-            )
+    if 'last_final_rows3' in st.session_state:
+        final_rows3 = st.session_state['last_final_rows3']
+        avisos3 = st.session_state['last_avisos3']
 
-            excel_rep3 = build_excel_rep3(final_rows3)
-            st.download_button(
-                "Descargar REP_3.xlsx",
-                data=excel_rep3,
-                file_name=nombre_con_sufijo("REP_3", "xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.success(f"REP_3 generado con {len(final_rows3)} filas.")
+        mostrar_kpis_rep3(final_rows3, avisos3)
+        if avisos3:
+            with st.expander(f"⚠️ Avisos REP_3 ({len(avisos3)})", expanded=True):
+                for a in avisos3:
+                    st.markdown(f"- {a}")
+
+        df3 = pd.DataFrame(final_rows3, columns=HEADERS_REP3)
+        st.dataframe(
+            df3.style.format({"% ASIGNADO PROCESO": "{:.2f}%", "GASTO ANUAL": "{:,.0f}"}),
+            width='stretch',
+        )
+
+        excel_rep3 = build_excel_rep3(final_rows3)
+        st.download_button(
+            "Descargar REP_3.xlsx",
+            data=excel_rep3,
+            file_name=nombre_con_sufijo("REP_3", "xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 if vista_activa == "CYG":
@@ -3842,6 +3856,19 @@ if vista_activa == "CYG":
         else:
             st.success("MCO_42 e ING_4 están cargadas.")
 
+    def build_excel_cyg_individual(nombre_hoja, headers, filas, pct_cols, monto_cols, widths):
+        """Arma un libro Excel con UNA sola tabla CYG (para descargar y
+        enviar cada tabla por separado, en vez del libro combinado)."""
+        wb_ind = openpyxl.Workbook()
+        wb_ind.remove(wb_ind.active)
+        ws_ind = _agregar_hoja_cyg(wb_ind, nombre_hoja, headers, filas, pct_cols=pct_cols, monto_cols=monto_cols)
+        for i, w in enumerate(widths, start=1):
+            ws_ind.column_dimensions[get_column_letter(i)].width = w
+        out_ind = io.BytesIO()
+        wb_ind.save(out_ind)
+        out_ind.seek(0)
+        return out_ind
+
     run_cyg = st.button("Generar tablas CYG", type="primary")
 
     if run_cyg:
@@ -3898,13 +3925,20 @@ if vista_activa == "CYG":
         )
         avisos_cyg = avisos_cyg + avisos9
 
-        total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
-        st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
-        mostrar_kpis_cyg(cyg14, cyg8, cyg9, avisos_cyg)
         st.session_state['last_cyg14'] = cyg14
         st.session_state['last_cyg8'] = cyg8
         st.session_state['last_cyg9'] = cyg9
         st.session_state['last_avisos_cyg'] = avisos_cyg
+
+    if "last_cyg14" in st.session_state:
+        cyg14 = st.session_state["last_cyg14"]
+        cyg8 = st.session_state["last_cyg8"]
+        cyg9 = st.session_state["last_cyg9"]
+        avisos_cyg = st.session_state["last_avisos_cyg"]
+
+        total_filas = sum(len(v) for v in cyg14.values()) + len(cyg8) + len(cyg9)
+        st.success(f"Tablas CYG generadas: {total_filas} filas en total.")
+        mostrar_kpis_cyg(cyg14, cyg8, cyg9, avisos_cyg)
         for nombre, filas in cyg14.items():
             st.write(f"**{nombre}**: {len(filas)} filas")
         st.write(f"**CYG_8**: {len(cyg8)} filas")
@@ -3915,18 +3949,6 @@ if vista_activa == "CYG":
                 for a in avisos_cyg:
                     st.markdown(f"- {a}")
 
-        def build_excel_cyg_individual(nombre_hoja, headers, filas, pct_cols, monto_cols, widths):
-            """Arma un libro Excel con UNA sola tabla CYG (para descargar y
-            enviar cada tabla por separado, en vez del libro combinado)."""
-            wb_ind = openpyxl.Workbook()
-            wb_ind.remove(wb_ind.active)
-            ws_ind = _agregar_hoja_cyg(wb_ind, nombre_hoja, headers, filas, pct_cols=pct_cols, monto_cols=monto_cols)
-            for i, w in enumerate(widths, start=1):
-                ws_ind.column_dimensions[get_column_letter(i)].width = w
-            out_ind = io.BytesIO()
-            wb_ind.save(out_ind)
-            out_ind.seek(0)
-            return out_ind
 
         st.markdown("**Descargar cada tabla por separado**")
         cols_cyg_dl = st.columns(3)
