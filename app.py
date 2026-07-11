@@ -464,6 +464,85 @@ def leer_tabla_st(file_bytes):
     return filas
 
 
+def leer_tabla_mei(file_bytes, necesita_obra_nbi=False, necesita_actividad=False):
+    """Lee una tabla MEI_x (MEI_1..MEI_4) detectando columnas por nombre de
+    encabezado, TOLERANTE a que se inserten columnas nuevas en el medio del
+    archivo (ej. una segunda columna 'ID Respaldo'), que es justo lo que
+    rompía la lectura por posición fija anterior. Devuelve una lista de
+    tuplas uniformes (empresa, periodo, anio, sector, cod_recurso,
+    cod_obra_nbi, monto_activado, total_gasto, cod_actividad) — las primeras
+    4 posiciones son siempre fijas (estándar SISS), cod_obra_nbi es None si
+    necesita_obra_nbi=False, y cod_actividad es None si
+    necesita_actividad=False (cada tabla MEI usa solo una de las dos)."""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    header_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+
+    idx_recurso = _encontrar_columna(header_row, [["CODIGO", "RECURSO"], ["COD", "RECURSO"]])
+    idx_activado = _encontrar_columna(header_row, [["MONTO", "ANUAL", "ACTIVADO"], ["MONTO", "ACTIVADO"]])
+    idx_gasto = _encontrar_columna(
+        header_row,
+        [["TOTAL", "GASTO", "ANUAL"], ["GASTO", "ANUAL", "NO", "ACTIVADO"], ["TOTAL", "GASTO"], ["GASTO"]],
+        evitar=["ACTIVADO", "%"],
+    )
+
+    faltantes = []
+    if idx_recurso is None:
+        faltantes.append("CÓDIGO RECURSO")
+    if idx_activado is None:
+        faltantes.append("MONTO ANUAL ACTIVADO")
+    if idx_gasto is None:
+        faltantes.append("TOTAL GASTO ANUAL")
+
+    idx_obra_nbi = None
+    if necesita_obra_nbi:
+        idx_obra_nbi = _encontrar_columna(header_row, [["OBRA", "TIPO", "NBI"], ["OBRA", "NBI"], ["ID", "OBRA"]])
+        if idx_obra_nbi is None:
+            faltantes.append("ID OBRA TIPO NBI")
+
+    idx_actividad = None
+    if necesita_actividad:
+        idx_actividad = _encontrar_columna(header_row, [["CODIGO", "ACTIVIDAD"], ["COD", "ACTIVIDAD"]])
+        if idx_actividad is None:
+            faltantes.append("CÓDIGO ACTIVIDAD")
+
+    if faltantes:
+        raise ValueError(f"No se identificaron las columnas: {', '.join(faltantes)}")
+
+    filas = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        cod_recurso = row[idx_recurso]
+        if cod_recurso is None:
+            continue
+        cod_recurso = _a_numero(cod_recurso)
+        cod_recurso = int(cod_recurso) if cod_recurso == int(cod_recurso) else cod_recurso
+        cod_obra_nbi = row[idx_obra_nbi] if idx_obra_nbi is not None else None
+        cod_actividad = row[idx_actividad] if idx_actividad is not None else None
+        filas.append((
+            row[0], row[1], row[2], row[3],
+            cod_recurso, cod_obra_nbi, _a_numero(row[idx_activado]), _a_numero(row[idx_gasto]), cod_actividad,
+        ))
+    return filas
+
+
+def safe_leer_tabla_mei(file_bytes, etiqueta, avisos, necesita_obra_nbi=False, necesita_actividad=False):
+    """Como leer_tabla_mei, pero tolera archivo ausente (None) o con error de
+    lectura: registra un aviso y devuelve lista vacía en vez de fallar."""
+    if file_bytes is None:
+        avisos.append(f"⚠️ Falta la tabla **{etiqueta}** — se excluye del cálculo (esa familia/recurso queda en 0 o incompleto).")
+        return []
+    try:
+        filas = leer_tabla_mei(file_bytes, necesita_obra_nbi=necesita_obra_nbi, necesita_actividad=necesita_actividad)
+    except Exception as e:
+        avisos.append(f"⚠️ No se pudo leer **{etiqueta}** ({e}) — se excluye del cálculo.")
+        return []
+    if len(filas) == 0:
+        avisos.append(f"ℹ️ La tabla **{etiqueta}** está vacía (sin filas de datos).")
+    return filas
+
+
 def identificar_tabla(nombre_archivo, tablas_conocidas):
     """Extrae el nombre de tabla (ej. 'ST_12', 'GPA_3') de un archivo subido,
     sin importar mayúsculas, extensión o sufijos. Devuelve None si no
@@ -690,10 +769,10 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
     ggi5 = safe_read_rows(fb.get("ggi5"), "GGI_5", avisos)
     ggm_tablas = [safe_read_rows(fb.get(f"ggm{i}"), f"GGM_{i}", avisos) for i in range(1, 6)]
     ogg5 = safe_read_rows(fb.get("ogg5"), "OGG_5", avisos)
-    mei1 = safe_read_rows(fb.get("mei1"), "MEI_1", avisos)
-    mei2 = safe_read_rows(fb.get("mei2"), "MEI_2", avisos)
-    mei3 = safe_read_rows(fb.get("mei3"), "MEI_3", avisos)
-    mei4 = safe_read_rows(fb.get("mei4"), "MEI_4", avisos)
+    mei1 = safe_leer_tabla_mei(fb.get("mei1"), "MEI_1", avisos, necesita_obra_nbi=True)
+    mei2 = safe_leer_tabla_mei(fb.get("mei2"), "MEI_2", avisos, necesita_actividad=True)
+    mei3 = safe_leer_tabla_mei(fb.get("mei3"), "MEI_3", avisos, necesita_actividad=True)
+    mei4 = safe_leer_tabla_mei(fb.get("mei4"), "MEI_4", avisos, necesita_actividad=True)
 
     agg = defaultdict(lambda: [0.0, 0.0])
 
@@ -785,10 +864,10 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
         ogg_params
     )
 
-    # --- MEI (índices de columna distintos por tabla; MEI_1 recurso en col6) ---
+    # --- MEI (lectura robusta por nombre de columna: recurso=4, activado=6, gasto=7) ---
     mei_by_recurso = procesar_familia_plana(
         agg, EMPRESA, PERIODO, ANIO, SECTOR,
-        [(mei1, 6, 20, 22), (mei2, 4, 17, 16), (mei3, 4, 17, 19), (mei4, 4, 14, 16)],
+        [(mei1, 4, 6, 7), (mei2, 4, 6, 7), (mei3, 4, 6, 7), (mei4, 4, 6, 7)],
         mei_params
     )
 
@@ -1600,15 +1679,15 @@ def build_rep3(fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_para
     # MEI_1 (4101, Productos químicos): SIN columna de actividad -> default/parametrizable.
     # MEI_2 (4102), MEI_3 (4103), MEI_4 (4104-4106): SÍ traen CÓDIGO ACTIVIDAD
     # por fila (como ST) -> se deriva el proceso directamente.
-    mei1 = safe_rows("mei1", "MEI_1")
-    mei2 = safe_rows("mei2", "MEI_2")
-    mei3 = safe_rows("mei3", "MEI_3")
-    mei4 = safe_rows("mei4", "MEI_4")
+    mei1 = safe_leer_tabla_mei(fb3.get("mei1"), "MEI_1", avisos3, necesita_obra_nbi=True)
+    mei2 = safe_leer_tabla_mei(fb3.get("mei2"), "MEI_2", avisos3, necesita_actividad=True)
+    mei3 = safe_leer_tabla_mei(fb3.get("mei3"), "MEI_3", avisos3, necesita_actividad=True)
+    mei4 = safe_leer_tabla_mei(fb3.get("mei4"), "MEI_4", avisos3, necesita_actividad=True)
 
     if mei1:
         mei1_regulado_por_recurso = defaultdict(float)
         for r in mei1:
-            cod_recurso, total_gasto = r[6], r[22]
+            cod_recurso, total_gasto = r[4], r[7]
             overrides = mei_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             mei1_regulado_por_recurso[cod_recurso] += total_gasto * pct_reg
@@ -1642,9 +1721,9 @@ def build_rep3(fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_para
             proceso = cod_proceso_de_actividad(cod_actividad)
             agg3[(cod_recurso, 11, proceso)] += gasto_regulado
 
-    procesar_mei_con_actividad(mei2, 4, 16, 21, "MEI_2")
-    procesar_mei_con_actividad(mei3, 4, 19, 9, "MEI_3")
-    procesar_mei_con_actividad(mei4, 4, 16, 6, "MEI_4")
+    procesar_mei_con_actividad(mei2, 4, 7, 8, "MEI_2")
+    procesar_mei_con_actividad(mei3, 4, 7, 8, "MEI_3")
+    procesar_mei_con_actividad(mei4, 4, 7, 8, "MEI_4")
 
     # ================= GPA =================
     # Cada tabla GPA_x tiene 100% de su gasto en un servicio regulado FIJO
@@ -2063,15 +2142,15 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
         _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, DEFAULT_ACTIVIDADES_OGG)
 
     # ================= MEI =================
-    mei1 = safe_rows("mei1", "MEI_1")
-    mei2 = safe_rows("mei2", "MEI_2")
-    mei3 = safe_rows("mei3", "MEI_3")
-    mei4 = safe_rows("mei4", "MEI_4")
+    mei1 = safe_leer_tabla_mei(fb.get("mei1"), "MEI_1", avisos, necesita_obra_nbi=True)
+    mei2 = safe_leer_tabla_mei(fb.get("mei2"), "MEI_2", avisos, necesita_actividad=True)
+    mei3 = safe_leer_tabla_mei(fb.get("mei3"), "MEI_3", avisos, necesita_actividad=True)
+    mei4 = safe_leer_tabla_mei(fb.get("mei4"), "MEI_4", avisos, necesita_actividad=True)
 
     # --- MEI_1: mapeo EXACTO vía CÓDIGO OBRA TIPO NBI (no estimación) ---
     obras_no_mapeadas = set()
     for r in mei1:
-        cod_recurso, cod_obra_nbi, monto_act, total_gasto = r[6], r[5], r[20], r[22]
+        cod_recurso, cod_obra_nbi, monto_act, total_gasto = r[4], r[5], r[6], r[7]
         overrides = mei_params.get(cod_recurso, [])
         pct_reg = 1.0 - sum(p for _, p in overrides)
         gasto_reg = total_gasto * pct_reg
@@ -2111,9 +2190,9 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
             agg_act[(int(cod_actividad), cod_recurso)][0] += gasto_reg
             agg_act[(int(cod_actividad), cod_recurso)][1] += act_reg
 
-    procesar_mei_con_actividad(mei2, 4, 16, 17, 21)
-    procesar_mei_con_actividad(mei3, 4, 19, 17, 9)
-    procesar_mei_con_actividad(mei4, 4, 16, 14, 6)
+    procesar_mei_con_actividad(mei2, 4, 7, 6, 8)
+    procesar_mei_con_actividad(mei3, 4, 7, 6, 8)
+    procesar_mei_con_actividad(mei4, 4, 7, 6, 8)
 
     # ================= ST =================
     tablas_st_faltantes = [t for t in ST_TABLES if t not in st_files_raw]
