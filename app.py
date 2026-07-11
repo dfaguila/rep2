@@ -543,6 +543,66 @@ def safe_leer_tabla_mei(file_bytes, etiqueta, avisos, necesita_obra_nbi=False, n
     return filas
 
 
+def leer_tabla_plana(file_bytes):
+    """Lee una tabla 'plana' (GGM_x, OGG_5: sin apertura por servicio/actividad
+    propia) detectando columnas por nombre de encabezado, TOLERANTE a que se
+    inserten o agreguen columnas (incluso columnas vacías al final, que es
+    justo lo que rompía la lectura por índice negativo r[-1]/r[-3] anterior).
+    Devuelve tuplas uniformes (empresa, periodo, anio, sector, cod_recurso,
+    monto_activado, total_gasto)."""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    header_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+
+    idx_recurso = _encontrar_columna(header_row, [["CODIGO", "RECURSO"], ["COD", "RECURSO"]])
+    idx_activado = _encontrar_columna(header_row, [["MONTO", "ANUAL", "ACTIVADO"], ["MONTO", "ACTIVADO"]])
+    idx_gasto = _encontrar_columna(
+        header_row,
+        [["TOTAL", "GASTO", "ANUAL"], ["GASTO", "ANUAL", "NO", "ACTIVADO"], ["TOTAL", "GASTO"], ["GASTO"]],
+        evitar=["ACTIVADO", "%"],
+    )
+    faltantes = []
+    if idx_recurso is None:
+        faltantes.append("CÓDIGO RECURSO")
+    if idx_activado is None:
+        faltantes.append("MONTO ANUAL ACTIVADO")
+    if idx_gasto is None:
+        faltantes.append("TOTAL GASTO ANUAL")
+    if faltantes:
+        raise ValueError(f"No se identificaron las columnas: {', '.join(faltantes)}")
+
+    filas = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        cod_recurso = row[idx_recurso]
+        if cod_recurso is None:
+            continue
+        cod_recurso = _a_numero(cod_recurso)
+        cod_recurso = int(cod_recurso) if cod_recurso == int(cod_recurso) else cod_recurso
+        filas.append((
+            row[0], row[1], row[2], row[3],
+            cod_recurso, _a_numero(row[idx_activado]), _a_numero(row[idx_gasto]),
+        ))
+    return filas
+
+
+def safe_leer_tabla_plana(file_bytes, etiqueta, avisos):
+    """Como leer_tabla_plana, pero tolera archivo ausente (None) o con error
+    de lectura: registra un aviso y devuelve lista vacía en vez de fallar."""
+    if file_bytes is None:
+        avisos.append(f"⚠️ Falta la tabla **{etiqueta}** — se excluye del cálculo (esa familia/recurso queda en 0 o incompleto).")
+        return []
+    try:
+        filas = leer_tabla_plana(file_bytes)
+    except Exception as e:
+        avisos.append(f"⚠️ No se pudo leer **{etiqueta}** ({e}) — se excluye del cálculo.")
+        return []
+    if len(filas) == 0:
+        avisos.append(f"ℹ️ La tabla **{etiqueta}** está vacía (sin filas de datos).")
+    return filas
+
+
 def identificar_tabla(nombre_archivo, tablas_conocidas):
     """Extrae el nombre de tabla (ej. 'ST_12', 'GPA_3') de un archivo subido,
     sin importar mayúsculas, extensión o sufijos. Devuelve None si no
@@ -767,8 +827,8 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
     ggv4 = safe_read_rows(fb.get("ggv4"), "GGV_4", avisos)
     ggv5 = safe_read_rows(fb.get("ggv5"), "GGV_5", avisos)
     ggi5 = safe_read_rows(fb.get("ggi5"), "GGI_5", avisos)
-    ggm_tablas = [safe_read_rows(fb.get(f"ggm{i}"), f"GGM_{i}", avisos) for i in range(1, 6)]
-    ogg5 = safe_read_rows(fb.get("ogg5"), "OGG_5", avisos)
+    ggm_tablas = [safe_leer_tabla_plana(fb.get(f"ggm{i}"), f"GGM_{i}", avisos) for i in range(1, 6)]
+    ogg5 = safe_leer_tabla_plana(fb.get("ogg5"), "OGG_5", avisos)
     mei1 = safe_leer_tabla_mei(fb.get("mei1"), "MEI_1", avisos, necesita_obra_nbi=True)
     mei2 = safe_leer_tabla_mei(fb.get("mei2"), "MEI_2", avisos, necesita_actividad=True)
     mei3 = safe_leer_tabla_mei(fb.get("mei3"), "MEI_3", avisos, necesita_actividad=True)
@@ -853,14 +913,14 @@ def build_rep2(fb, ggm_params, ogg_params, mei_params, st_files, st_params, gpa_
     # --- GGM ---
     ggm_by_recurso = procesar_familia_plana(
         agg, EMPRESA, PERIODO, ANIO, SECTOR,
-        [(t, 4, -3, -1) for t in ggm_tablas],
+        [(t, 4, 5, 6) for t in ggm_tablas],  # lectura robusta: recurso=4, activado=5, gasto=6
         ggm_params
     )
 
     # --- OGG ---
     ogg_by_recurso = procesar_familia_plana(
         agg, EMPRESA, PERIODO, ANIO, SECTOR,
-        [(ogg5, 4, 9, 11)],
+        [(ogg5, 4, 5, 6)],  # lectura robusta: recurso=4, activado=5, gasto=6
         ogg_params
     )
 
@@ -1607,12 +1667,12 @@ def build_rep3(fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_para
             avisos3.append(f"⚠️ GGI: {len(inmuebles_sin_ggi6)} inmueble(s) con dedicación regulada sin apertura en GGI_6; se excluyen de REP_3.")
 
     # ================= GGM (sin tabla de actividad: default/parametrizable) =================
-    ggm_tablas = [safe_rows(f"ggm{i}", f"GGM_{i}") for i in range(1, 6)]
+    ggm_tablas = [safe_leer_tabla_plana(fb3.get(f"ggm{i}"), f"GGM_{i}", avisos3) for i in range(1, 6)]
     if any(ggm_tablas):
         ggm_regulado_por_recurso = defaultdict(float)  # solo la porción a familia 11 (servicio 1101 u overrides de GGM_PARAMS)
         for tabla in ggm_tablas:
             for r in tabla:
-                cod_recurso, total_gasto = r[4], r[-1]
+                cod_recurso, total_gasto = r[4], r[6]
                 overrides = ggm_params.get(cod_recurso, [])
                 pct_reg = 1.0 - sum(p for _, p in overrides)  # % que va a servicio 1101 (familia 11)
                 ggm_regulado_por_recurso[cod_recurso] += total_gasto * pct_reg
@@ -1632,11 +1692,11 @@ def build_rep3(fb3, ggm_proceso_params, ogg_proceso_params, ggm_params, ogg_para
                 agg3[(cod_recurso, 11, proceso_default)] += gasto
 
     # ================= OGG (sin tabla de actividad: default/parametrizable) =================
-    ogg5 = safe_rows("ogg5", "OGG_5")
+    ogg5 = safe_leer_tabla_plana(fb3.get("ogg5"), "OGG_5", avisos3)
     if ogg5:
         ogg_regulado_por_recurso = defaultdict(float)
         for r in ogg5:
-            cod_recurso, monto_act, total_gasto = r[4], r[9], r[11]
+            cod_recurso, monto_act, total_gasto = r[4], r[5], r[6]
             overrides = ogg_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             ogg_regulado_por_recurso[cod_recurso] += total_gasto * pct_reg
@@ -2075,11 +2135,11 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
                     agg_act[(cod_actividad, cod_recurso)][0] += gasto_no_act * pct_igual
 
     # ================= GGM =================
-    ggm_tablas = [safe_rows(f"ggm{i}", f"GGM_{i}") for i in range(1, 6)]
+    ggm_tablas = [safe_leer_tabla_plana(fb.get(f"ggm{i}"), f"GGM_{i}", avisos) for i in range(1, 6)]
     ggm_regulado_por_recurso = defaultdict(lambda: [0.0, 0.0])  # [gasto_no_act, monto_act]
     for tabla in ggm_tablas:
         for r in tabla:
-            cod_recurso, monto_act, total_gasto = r[4], r[-3], r[-1]
+            cod_recurso, monto_act, total_gasto = r[4], r[5], r[6]
             overrides = ggm_params.get(cod_recurso, [])
             pct_reg = 1.0 - sum(p for _, p in overrides)
             agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
@@ -2122,10 +2182,10 @@ def build_cyg_core(fb, ggm_params, ogg_params, mei_params, st_params, st_files_r
         _repartir_actividades_igual(cod_recurso, gasto_g, gasto_a, proceso_default, overrides_proceso, DEFAULT_ACTIVIDADES_GGM)
 
     # ================= OGG =================
-    ogg5 = safe_rows("ogg5", "OGG_5")
+    ogg5 = safe_leer_tabla_plana(fb.get("ogg5"), "OGG_5", avisos)
     ogg_regulado_por_recurso = defaultdict(lambda: [0.0, 0.0])
     for r in ogg5:
-        cod_recurso, monto_act, total_gasto = r[4], r[9], r[11]
+        cod_recurso, monto_act, total_gasto = r[4], r[5], r[6]
         overrides = ogg_params.get(cod_recurso, [])
         pct_reg = 1.0 - sum(p for _, p in overrides)
         agg_serv[(1101, cod_recurso)][0] += total_gasto * pct_reg
