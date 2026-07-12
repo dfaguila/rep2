@@ -2721,7 +2721,7 @@ def build_cyg_9(agg_serv, mco42_bytes, ing4_bytes, empresa_periodo_anio_sector):
 TABLAS_SIMPLES = [
     "GRH_8", "GRH_11", "GRH_12",
     "GCP_4", "GCP_5", "GCP_6",
-    "GGV_4", "GGV_5", "GGV_6",
+    "GGV_3", "GGV_4", "GGV_5", "GGV_6",
     "GGI_5", "GGI_6",
     "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5",
     "OGG_5",
