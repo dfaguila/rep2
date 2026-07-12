@@ -603,6 +603,163 @@ def safe_leer_tabla_plana(file_bytes, etiqueta, avisos):
     return filas
 
 
+# ============================================================================
+# LISTADO DE ID RESPALDO -> MCO (tablas de sustento)
+# ============================================================================
+TABLAS_CON_RESPALDO = [
+    "MEI_1", "MEI_2", "MEI_4",
+    "GPA_1", "GPA_2", "GPA_3", "GPA_4", "GPA_5", "GPA_6",
+    "GGV_3", "OGG_5",
+]
+TABLAS_MEI_RESPALDO = {"MEI_1", "MEI_2", "MEI_4"}
+
+MCO_ESTANDAR = {
+    1: ("MCO_4", "Contratos servicios recibidos"),
+    2: ("MCO_9", "Orden de compra servicio"),
+    3: ("MCO_12", "Facturas servicios"),
+    9999: ("MCO_12", "Facturas servicios"),  # OGG_5: fondos rotatorios, reembolsos, rendiciones, etc.
+}
+MCO_MEI = {
+    1: ("MCO_6", "Contrato Suministro insumos"),
+    2: ("MCO_9", "Orden de compra servicio"),
+    3: ("MCO_13", "Facturas de suministros"),
+}
+
+
+def inferir_tipo_respaldo_ogg(id_respaldo):
+    """OGG_5 no trae columna TIPO RESPALDO en el estándar SISS. Se infiere
+    a partir del texto del propio ID RESPALDO, reconociendo el código FA/CO/OC
+    tanto al inicio del texto ('FA-123') como en medio ('S-FA-123'):
+    - 'CO-' al inicio o '-CO-' en medio -> 1 (Contrato)
+    - 'OC-' al inicio o '-OC-' en medio -> 2 (Orden de Compra)
+    - 'FA-' al inicio o '-FA-' en medio -> 3 (Factura)
+    - si no calza con ninguno -> 9999 (fondos rotatorios, reembolsos,
+      rendiciones, dietas, patentes, etc. -- no tienen contrato/OC/factura
+      de proveedor asociada, se declaran igual como Factura por defecto)."""
+    texto = str(id_respaldo).upper()
+    if texto.startswith("CO-") or "-CO-" in texto:
+        return 1
+    if texto.startswith("OC-") or "-OC-" in texto:
+        return 2
+    if texto.startswith("FA-") or "-FA-" in texto:
+        return 3
+    return 9999
+
+
+def leer_id_tipo_respaldo(file_bytes, nombre_tabla, avisos):
+    """Lee de una tabla las columnas ID RESPALDO y TIPO RESPALDO por nombre
+    de encabezado (robusto a mayúsculas/minúsculas y variantes). Devuelve
+    lista de (tabla, id_respaldo, tipo_respaldo). Para OGG_5 (que no trae
+    TIPO RESPALDO en el estándar SISS), el tipo se infiere del propio texto
+    del ID RESPALDO vía inferir_tipo_respaldo_ogg()."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        header_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    except Exception as e:
+        avisos.append(f"⚠️ Respaldos: no se pudo leer **{nombre_tabla}** ({e}).")
+        return []
+
+    idx_id = _encontrar_columna(header_row, [["ID", "RESPALDO"]])
+    idx_tipo = _encontrar_columna(header_row, [["TIPO", "RESPALDO"]])
+    if idx_id is None:
+        avisos.append(f"⚠️ Respaldos: **{nombre_tabla}** no tiene columna ID RESPALDO reconocible.")
+        return []
+    if idx_tipo is None and nombre_tabla != "OGG_5":
+        avisos.append(f"ℹ️ Respaldos: **{nombre_tabla}** no tiene columna TIPO RESPALDO — sus ID Respaldo se listan sin MCO asignado.")
+    if idx_tipo is None and nombre_tabla == "OGG_5":
+        avisos.append(f"ℹ️ Respaldos: **{nombre_tabla}** no trae TIPO RESPALDO (estándar SISS) — se infiere desde el texto del ID RESPALDO (-CO-/-OC-/-FA-; el resto queda como 9999).")
+
+    filas = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        id_resp = row[idx_id]
+        if id_resp is None or str(id_resp).strip() == "":
+            continue
+        if idx_tipo is not None:
+            tipo_resp = row[idx_tipo]
+        elif nombre_tabla == "OGG_5":
+            tipo_resp = inferir_tipo_respaldo_ogg(id_resp)
+        else:
+            tipo_resp = None
+        if tipo_resp is not None:
+            try:
+                tipo_resp = int(_a_numero(tipo_resp))
+            except Exception:
+                pass
+        filas.append((nombre_tabla, id_resp, tipo_resp))
+    return filas
+
+
+def armar_listado_respaldos(archivos_disponibles):
+    """archivos_disponibles: dict {nombre_tabla: file_bytes}. Devuelve
+    (filas, avisos) con filas = [(tabla, id_respaldo, tipo_respaldo,
+    codigo_mco, descripcion_mco), ...], únicas por (tabla, id_respaldo,
+    tipo_respaldo), ordenadas por tabla e ID Respaldo."""
+    avisos = []
+    todas_filas = []
+    for tabla in TABLAS_CON_RESPALDO:
+        if tabla not in archivos_disponibles:
+            avisos.append(f"ℹ️ Respaldos: **{tabla}** no está cargada — se omite del listado.")
+            continue
+        todas_filas.extend(leer_id_tipo_respaldo(archivos_disponibles[tabla], tabla, avisos))
+
+    vistos = set()
+    resultado = []
+    tipos_no_reconocidos = set()
+    for tabla, id_resp, tipo_resp in todas_filas:
+        clave = (tabla, id_resp, tipo_resp)
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        mapa = MCO_MEI if tabla in TABLAS_MEI_RESPALDO else MCO_ESTANDAR
+        if tipo_resp in mapa:
+            mco_codigo, mco_desc = mapa[tipo_resp]
+        else:
+            mco_codigo, mco_desc = None, None
+            if tipo_resp is not None:
+                tipos_no_reconocidos.add((tabla, tipo_resp))
+        resultado.append((tabla, id_resp, tipo_resp, mco_codigo, mco_desc))
+
+    for tabla, tipo_resp in sorted(tipos_no_reconocidos):
+        avisos.append(f"⚠️ Respaldos: **{tabla}** tiene Tipo Respaldo={tipo_resp} no reconocido (se esperaba 1, 2 o 3) — MCO sin asignar en esas filas.")
+
+    resultado.sort(key=lambda r: (r[0], str(r[1])))
+    return resultado, avisos
+
+
+def build_excel_respaldos(filas, avisos):
+    """Arma el libro Excel del listado ID RESPALDO -> MCO."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Respaldos_MCO"
+    headers = ["TABLA", "ID RESPALDO", "TIPO RESPALDO", "MCO", "DESCRIPCIÓN MCO"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for tabla, id_resp, tipo_resp, mco_codigo, mco_desc in filas:
+        ws.append([tabla, id_resp, tipo_resp, mco_codigo or "(sin asignar)", mco_desc or ""])
+    widths = [12, 30, 14, 12, 32]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+    if avisos:
+        ws2 = wb.create_sheet("Avisos")
+        ws2.append(["Aviso"])
+        ws2["A1"].font = Font(bold=True)
+        for a in avisos:
+            ws2.append([a])
+        ws2.column_dimensions["A"].width = 110
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
 def identificar_tabla(nombre_archivo, tablas_conocidas):
     """Extrae el nombre de tabla (ej. 'ST_12', 'GPA_3') de un archivo subido,
     sin importar mayúsculas, extensión o sufijos. Devuelve None si no
@@ -3866,6 +4023,54 @@ if vista_activa == "REP":
             "Descargar REP_3.xlsx",
             data=excel_rep3,
             file_name=nombre_con_sufijo("REP_3", "xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.divider()
+    st.header("📑 Listado de ID Respaldo → MCO (tablas de sustento)")
+    st.caption(
+        "Genera un Excel con todos los ID RESPALDO de MEI_1, MEI_2, MEI_4, "
+        "GPA_1 a GPA_6, GGV_3 y OGG_5 (los que corresponda tener cargados), "
+        "indicando de qué tabla vienen, su Tipo Respaldo, y a qué MCO se "
+        "deben declarar según ese tipo."
+    )
+    with st.expander("Ver criterio de asignación MCO"):
+        st.markdown(
+            "**Tablas estándar** (GPA_1-6, GGV_3, OGG_5):\n"
+            "- Tipo Respaldo 1 → MCO_4 (Contratos servicios recibidos)\n"
+            "- Tipo Respaldo 2 → MCO_9 (Orden de compra servicio)\n"
+            "- Tipo Respaldo 3 → MCO_12 (Facturas servicios)\n\n"
+            "**Tablas MEI** (MEI_1, MEI_2, MEI_4):\n"
+            "- Tipo Respaldo 1 → MCO_6 (Contrato Suministro insumos)\n"
+            "- Tipo Respaldo 2 → MCO_9 (Orden de compra servicio)\n"
+            "- Tipo Respaldo 3 → MCO_13 (Facturas de suministros)"
+        )
+
+    if st.button("Generar Listado de Respaldos", key="btn_generar_respaldos"):
+        filas_resp, avisos_resp = armar_listado_respaldos(archivos_zip)
+        st.session_state["last_filas_respaldos"] = filas_resp
+        st.session_state["last_avisos_respaldos"] = avisos_resp
+
+    if "last_filas_respaldos" in st.session_state:
+        filas_resp = st.session_state["last_filas_respaldos"]
+        avisos_resp = st.session_state["last_avisos_respaldos"]
+        st.success(f"{len(filas_resp)} ID Respaldo único(s) encontrados.")
+        sin_mco = sum(1 for f in filas_resp if f[3] is None)
+        c1, c2 = st.columns(2)
+        c1.metric("Total ID Respaldo", len(filas_resp))
+        c2.metric("Sin MCO asignado", sin_mco)
+        if avisos_resp:
+            with st.expander(f"⚠️ Avisos ({len(avisos_resp)})", expanded=True):
+                for a in avisos_resp:
+                    st.markdown(f"- {a}")
+        df_resp = pd.DataFrame(filas_resp, columns=["TABLA", "ID RESPALDO", "TIPO RESPALDO", "MCO", "DESCRIPCIÓN MCO"])
+        df_resp["ID RESPALDO"] = df_resp["ID RESPALDO"].astype(str)
+        st.dataframe(df_resp, width="stretch")
+        excel_resp = build_excel_respaldos(filas_resp, avisos_resp)
+        st.download_button(
+            "Descargar Listado_Respaldos_MCO.xlsx",
+            data=excel_resp,
+            file_name=nombre_con_sufijo("Listado_Respaldos_MCO", "xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
