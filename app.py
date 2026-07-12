@@ -760,6 +760,225 @@ def build_excel_respaldos(filas, avisos):
     return out
 
 
+# ============================================================================
+# CONSOLIDADO ID SERVICIO / SUBSERVICIO TERCERIZADO
+# ============================================================================
+_ST_SOLO_SUBSERVICIO = [f"ST_{i}" for i in range(3, 11)]  # ST_3..ST_10
+_ST_AMBOS = [t for t in ST_TABLES if t not in _ST_SOLO_SUBSERVICIO]  # ST_11..ST_34
+_TABLAS_SOLO_SERVICIO = ["GGI_1", "GGI_2", "GGM_1", "GGM_2", "GGM_3"]
+
+TABLAS_SERVICIO_TERCERIZADO = _ST_SOLO_SUBSERVICIO + _ST_AMBOS + _TABLAS_SOLO_SERVICIO
+
+MCO_SERVICIO_TERCERIZADO = {
+    1: ("MCO_4", "Contrato Servicios"),
+    2: ("MCO_9", "Orden de Compra servicios"),
+    3: ("MCO_12", "Factura Servicios"),
+}
+
+
+def inferir_tipo_respaldo_servicio(id_servicio):
+    """Igual criterio que inferir_tipo_respaldo_ogg, aplicado sobre el ID
+    SERVICIO TERCERIZADO: reconoce CO-/OC-/FA- al inicio o rodeado de
+    guiones. Si no calza con ninguno -> 9999 (sin MCO fijo; se debe asignar
+    manualmente)."""
+    texto = str(id_servicio).upper()
+    if texto.startswith("CO-") or "-CO-" in texto:
+        return 1
+    if texto.startswith("OC-") or "-OC-" in texto:
+        return 2
+    if texto.startswith("FA-") or "-FA-" in texto:
+        return 3
+    return 9999
+
+
+def leer_tabla_servicio_tercerizado(file_bytes, nombre_tabla, tiene_servicio, tiene_subservicio, avisos):
+    """Lee CÓDIGO RECURSO, ID SERVICIO TERCERIZADO / ID SUBSERVICIO
+    TERCERIZADO (el que exista en la tabla), MONTO ANUAL ACTIVADO y TOTAL
+    GASTO ANUAL, por nombre de columna. Completa el campo faltante:
+    - Si solo hay subservicio (ej. 'SS-CO-123'): servicio = subservicio sin
+      la primera 'S' (-> 'S-CO-123').
+    - Si solo hay servicio (ej. 'S-CO-123'): subservicio = 'S' + servicio
+      (-> 'SS-CO-123').
+    Devuelve lista de (tabla, cod_recurso, id_servicio, id_subservicio,
+    gasto_anual, monto_activado)."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        header_row = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    except Exception as e:
+        avisos.append(f"⚠️ Servicio Tercerizado: no se pudo leer **{nombre_tabla}** ({e}).")
+        return []
+
+    idx_recurso = _encontrar_columna(header_row, [["CODIGO", "RECURSO"], ["COD", "RECURSO"]])
+    idx_activado = _encontrar_columna(header_row, [["MONTO", "ANUAL", "ACTIVADO"], ["MONTO", "ACTIVADO"]])
+    idx_gasto = _encontrar_columna(
+        header_row,
+        [["TOTAL", "GASTO", "ANUAL"], ["GASTO", "ANUAL", "NO", "ACTIVADO"], ["TOTAL", "GASTO"], ["GASTO"]],
+        evitar=["ACTIVADO", "%"],
+    )
+    idx_servicio = _encontrar_columna(header_row, [["ID", "SERVICIO", "TERCERIZADO"]], evitar=["SUB"]) if tiene_servicio else None
+    idx_subservicio = _encontrar_columna(header_row, [["ID", "SUBSERVICIO", "TERCERIZADO"]]) if tiene_subservicio else None
+
+    faltantes = []
+    if idx_recurso is None:
+        faltantes.append("CÓDIGO RECURSO")
+    if idx_activado is None:
+        faltantes.append("MONTO ANUAL ACTIVADO")
+    if idx_gasto is None:
+        faltantes.append("TOTAL GASTO ANUAL")
+    if tiene_servicio and idx_servicio is None:
+        faltantes.append("ID SERVICIO TERCERIZADO")
+    if tiene_subservicio and idx_subservicio is None:
+        faltantes.append("ID SUBSERVICIO TERCERIZADO")
+    if faltantes:
+        avisos.append(f"⚠️ Servicio Tercerizado: **{nombre_tabla}** no tiene columna(s): {', '.join(faltantes)} — se omite.")
+        return []
+
+    filas = []
+    sin_s_inicial = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        cod_recurso = row[idx_recurso]
+        if cod_recurso is None:
+            continue
+        cod_recurso = _a_numero(cod_recurso)
+        cod_recurso = int(cod_recurso) if cod_recurso == int(cod_recurso) else cod_recurso
+        gasto = _a_numero(row[idx_gasto])
+        activado = _a_numero(row[idx_activado])
+
+        id_serv = row[idx_servicio] if idx_servicio is not None else None
+        id_subserv = row[idx_subservicio] if idx_subservicio is not None else None
+
+        if id_serv is None and id_subserv is not None:
+            texto_sub = str(id_subserv).strip()
+            if texto_sub.upper().startswith("S"):
+                id_serv = texto_sub[1:]
+            else:
+                id_serv = texto_sub
+                sin_s_inicial += 1
+        elif id_subserv is None and id_serv is not None:
+            id_subserv = "S" + str(id_serv).strip()
+
+        if id_serv is None and id_subserv is None:
+            continue
+
+        filas.append((nombre_tabla, cod_recurso, id_serv, id_subserv, gasto, activado))
+
+    if sin_s_inicial:
+        avisos.append(
+            f"⚠️ Servicio Tercerizado: en **{nombre_tabla}**, {sin_s_inicial} ID Subservicio no empezaban con "
+            f"'S' — se usaron tal cual para derivar el ID Servicio (revisar formato)."
+        )
+    return filas
+
+
+def armar_trazabilidad_servicio_tercerizado(archivos_disponibles):
+    """archivos_disponibles: dict {nombre_tabla: file_bytes}. Devuelve
+    (filas_trazabilidad, filas_agregado, avisos).
+    filas_trazabilidad: una fila por cada fila fuente, sin consolidar:
+      (tabla, cod_recurso, id_servicio, id_subservicio, gasto_anual, monto_activado)
+    filas_agregado: consolidado por ID SERVICIO TERCERIZADO (sumando gasto y
+    activado de todas sus ocurrencias), con Tipo Respaldo y MCO:
+      (id_servicio, gasto_total, monto_activado_total, tipo_respaldo, mco, descripcion_mco)
+    """
+    avisos = []
+    todas_filas = []
+
+    for tabla in _ST_SOLO_SUBSERVICIO:
+        if tabla not in archivos_disponibles:
+            avisos.append(f"ℹ️ Servicio Tercerizado: **{tabla}** no está cargada — se omite.")
+            continue
+        todas_filas.extend(leer_tabla_servicio_tercerizado(
+            archivos_disponibles[tabla], tabla, tiene_servicio=False, tiene_subservicio=True, avisos=avisos))
+
+    for tabla in _ST_AMBOS:
+        if tabla not in archivos_disponibles:
+            avisos.append(f"ℹ️ Servicio Tercerizado: **{tabla}** no está cargada — se omite.")
+            continue
+        todas_filas.extend(leer_tabla_servicio_tercerizado(
+            archivos_disponibles[tabla], tabla, tiene_servicio=True, tiene_subservicio=True, avisos=avisos))
+
+    for tabla in _TABLAS_SOLO_SERVICIO:
+        if tabla not in archivos_disponibles:
+            avisos.append(f"ℹ️ Servicio Tercerizado: **{tabla}** no está cargada — se omite.")
+            continue
+        todas_filas.extend(leer_tabla_servicio_tercerizado(
+            archivos_disponibles[tabla], tabla, tiene_servicio=True, tiene_subservicio=False, avisos=avisos))
+
+    # --- Hoja 1: trazabilidad (sin consolidar) ---
+    filas_trazabilidad = todas_filas
+
+    # --- Hoja 2: agregado por ID SERVICIO TERCERIZADO ---
+    agregado = defaultdict(lambda: [0.0, 0.0])  # id_servicio -> [gasto, activado]
+    for _, _, id_serv, _, gasto, activado in todas_filas:
+        agregado[id_serv][0] += gasto
+        agregado[id_serv][1] += activado
+
+    filas_agregado = []
+    for id_serv, (gasto_tot, activado_tot) in agregado.items():
+        tipo = inferir_tipo_respaldo_servicio(id_serv)
+        if tipo in MCO_SERVICIO_TERCERIZADO:
+            mco_codigo, mco_desc = MCO_SERVICIO_TERCERIZADO[tipo]
+        else:
+            mco_codigo, mco_desc = "Asignar MCO", ""
+        filas_agregado.append((id_serv, gasto_tot, activado_tot, tipo, mco_codigo, mco_desc))
+
+    filas_trazabilidad.sort(key=lambda r: (r[0], str(r[2])))
+    filas_agregado.sort(key=lambda r: str(r[0]))
+
+    return filas_trazabilidad, filas_agregado, avisos
+
+
+def build_excel_servicio_tercerizado(filas_trazabilidad, filas_agregado, avisos):
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Trazabilidad"
+    headers1 = ["TABLA", "CÓDIGO RECURSO", "ID SERVICIO TERCERIZADO", "ID SUBSERVICIO TERCERIZADO", "GASTO ANUAL", "MONTO ACTIVADO"]
+    ws1.append(headers1)
+    for cell in ws1[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for tabla, cod_recurso, id_serv, id_subserv, gasto, activado in filas_trazabilidad:
+        ws1.append([tabla, cod_recurso, id_serv, id_subserv, round(gasto, 2), round(activado, 2)])
+    widths1 = [12, 16, 26, 30, 16, 16]
+    for i, w in enumerate(widths1, start=1):
+        ws1.column_dimensions[get_column_letter(i)].width = w
+    ws1.freeze_panes = "A2"
+    for row in ws1.iter_rows(min_row=2, min_col=5, max_col=6):
+        for cell in row:
+            cell.number_format = "#,##0"
+
+    ws2 = wb.create_sheet("Agregado")
+    headers2 = ["ID SERVICIO TERCERIZADO", "GASTO ANUAL TOTAL", "MONTO ACTIVADO TOTAL", "TIPO RESPALDO", "MCO", "DESCRIPCIÓN MCO"]
+    ws2.append(headers2)
+    for cell in ws2[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for id_serv, gasto_tot, activado_tot, tipo, mco_codigo, mco_desc in filas_agregado:
+        ws2.append([id_serv, round(gasto_tot, 2), round(activado_tot, 2), tipo, mco_codigo, mco_desc])
+    widths2 = [26, 18, 18, 14, 14, 26]
+    for i, w in enumerate(widths2, start=1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+    ws2.freeze_panes = "A2"
+    for row in ws2.iter_rows(min_row=2, min_col=2, max_col=3):
+        for cell in row:
+            cell.number_format = "#,##0"
+
+    if avisos:
+        ws3 = wb.create_sheet("Avisos")
+        ws3.append(["Aviso"])
+        ws3["A1"].font = Font(bold=True)
+        for a in avisos:
+            ws3.append([a])
+        ws3.column_dimensions["A"].width = 110
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
 def identificar_tabla(nombre_archivo, tablas_conocidas):
     """Extrae el nombre de tabla (ej. 'ST_12', 'GPA_3') de un archivo subido,
     sin importar mayúsculas, extensión o sufijos. Devuelve None si no
@@ -4071,6 +4290,59 @@ if vista_activa == "REP":
             "Descargar Listado_Respaldos_MCO.xlsx",
             data=excel_resp,
             file_name=nombre_con_sufijo("Listado_Respaldos_MCO", "xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.divider()
+    st.header("🔗 Consolidado ID Servicio / Subservicio Tercerizado")
+    st.caption(
+        "Consolida el ID SERVICIO TERCERIZADO y el ID SUBSERVICIO TERCERIZADO "
+        "de ST_3 a ST_34, GGI_1, GGI_2, GGM_1, GGM_2 y GGM_3 (las que tengas "
+        "cargadas). ST_3-ST_10 solo traen subservicio (se deriva el servicio "
+        "quitando la primera 'S'); GGI_1/2 y GGM_1-3 solo traen servicio (se "
+        "deriva el subservicio agregando una 'S' al inicio); ST_11-ST_34 ya "
+        "traen ambos."
+    )
+    with st.expander("Ver criterio de asignación MCO (hoja Agregado)"):
+        st.markdown(
+            "- ID Servicio empieza con 'CO-' o contiene '-CO-' → Tipo 1 → MCO_4 (Contrato Servicios)\n"
+            "- ID Servicio empieza con 'OC-' o contiene '-OC-' → Tipo 2 → MCO_9 (Orden de Compra servicios)\n"
+            "- ID Servicio empieza con 'FA-' o contiene '-FA-' → Tipo 3 → MCO_12 (Factura Servicios)\n"
+            "- Si no calza con ninguno → Tipo 9999 → 'Asignar MCO' (requiere revisión manual)"
+        )
+
+    if st.button("Generar Consolidado Servicio Tercerizado", key="btn_generar_servicio_tercerizado"):
+        trazab_serv, agregado_serv, avisos_serv = armar_trazabilidad_servicio_tercerizado(archivos_zip)
+        st.session_state["last_trazab_servicio"] = trazab_serv
+        st.session_state["last_agregado_servicio"] = agregado_serv
+        st.session_state["last_avisos_servicio"] = avisos_serv
+
+    if "last_trazab_servicio" in st.session_state:
+        trazab_serv = st.session_state["last_trazab_servicio"]
+        agregado_serv = st.session_state["last_agregado_servicio"]
+        avisos_serv = st.session_state["last_avisos_servicio"]
+        st.success(f"{len(trazab_serv)} fila(s) de trazabilidad · {len(agregado_serv)} ID Servicio único(s) en el agregado.")
+        sin_mco_serv = sum(1 for f in agregado_serv if f[3] == 9999)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Filas trazabilidad", len(trazab_serv))
+        c2.metric("ID Servicio únicos", len(agregado_serv))
+        c3.metric("Sin MCO reconocido (9999)", sin_mco_serv)
+        if avisos_serv:
+            with st.expander(f"⚠️ Avisos ({len(avisos_serv)})", expanded=False):
+                for a in avisos_serv:
+                    st.markdown(f"- {a}")
+        tab1, tab2 = st.tabs(["Trazabilidad", "Agregado"])
+        with tab1:
+            df_trazab = pd.DataFrame(trazab_serv, columns=["TABLA", "CÓDIGO RECURSO", "ID SERVICIO TERCERIZADO", "ID SUBSERVICIO TERCERIZADO", "GASTO ANUAL", "MONTO ACTIVADO"])
+            st.dataframe(df_trazab, width="stretch")
+        with tab2:
+            df_agregado = pd.DataFrame(agregado_serv, columns=["ID SERVICIO TERCERIZADO", "GASTO ANUAL TOTAL", "MONTO ACTIVADO TOTAL", "TIPO RESPALDO", "MCO", "DESCRIPCIÓN MCO"])
+            st.dataframe(df_agregado, width="stretch")
+        excel_serv = build_excel_servicio_tercerizado(trazab_serv, agregado_serv, avisos_serv)
+        st.download_button(
+            "Descargar Consolidado_Servicio_Tercerizado.xlsx",
+            data=excel_serv,
+            file_name=nombre_con_sufijo("Consolidado_Servicio_Tercerizado", "xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
