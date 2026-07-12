@@ -2938,15 +2938,25 @@ def build_cyg_9(agg_serv, mco42_bytes, ing4_bytes, empresa_periodo_anio_sector):
 
 # Tablas "simples" (nombre único, sin variantes ST_x/GPA_x)
 TABLAS_SIMPLES = [
-    "GRH_8", "GRH_11", "GRH_12",
+    "GRH_1", "GRH_8", "GRH_11", "GRH_12",
     "GCP_4", "GCP_5", "GCP_6",
     "GGV_3", "GGV_4", "GGV_5", "GGV_6",
-    "GGI_5", "GGI_6",
+    "GGI_1", "GGI_2", "GGI_5", "GGI_6",
     "GGM_1", "GGM_2", "GGM_3", "GGM_4", "GGM_5",
     "OGG_5",
     "MEI_1", "MEI_2", "MEI_3", "MEI_4",
     "MCO_42", "ING_4",
 ]
+
+# Prefijos de familia reconocidos del SCR (Sistema Contable Regulatorio). Se
+# usan como respaldo genérico en identificar_tabla_generico(): cualquier
+# archivo "{FAMILIA}_{NUMERO}..." con una de estas familias se reconoce
+# automáticamente como esa tabla, AUNQUE NO esté en TABLAS_SIMPLES/ST_TABLES/
+# GPA_TABLES explícitamente. Así, tablas nuevas del SCR que se incorporen a
+# futuras funciones (ej. una GGI_3 o GRH_2 que hoy no existen) se reconocen
+# solas al cargarlas, sin tener que acordarse de agregarlas aquí a mano.
+FAMILIAS_SCR_CONOCIDAS = ["GRH", "GCP", "GGV", "GGI", "GGM", "OGG", "MEI", "ST", "GPA", "MCO", "ING"]
+
 
 # Catálogo completo para el emparejamiento (simples + ST_x + GPA_x)
 def _catalogo_completo():
@@ -2955,17 +2965,28 @@ def _catalogo_completo():
 
 def identificar_tabla_generico(nombre_archivo, catalogo):
     """Extrae el nombre de tabla (ej. 'MEI_1', 'ST_12', 'GRH_8') de un nombre
-    de archivo, tolerando texto adicional después (fecha, versión, etc.),
-    sin importar mayúsculas/minúsculas. Se compara por el nombre MÁS LARGO
-    que calce primero (para que 'GGM_1' no capture erróneamente un archivo
-    'GGM_11...' si existiera, aunque en este catálogo no hay colisión así).
-    Devuelve None si no matchea ninguna tabla conocida."""
+    de archivo, tolerando texto adicional despues (fecha, version, etc.),
+    sin importar mayusculas/minusculas. Se compara por el nombre MAS LARGO
+    que calce primero.
+
+    Si el nombre no calza con nada del catalogo explicito, se intenta un
+    reconocimiento GENERICO: cualquier archivo con forma '{FAMILIA}_{NUMERO}'
+    donde FAMILIA sea una de FAMILIAS_SCR_CONOCIDAS se reconoce igual (esto
+    cubre tablas del SCR que aun no estan explicitamente catalogadas).
+
+    Devuelve None si no matchea ni el catalogo ni el patron generico."""
     base = re.sub(r"\.(XLSX|XLS)$", "", nombre_archivo.upper())
     candidatos = sorted(catalogo, key=len, reverse=True)
     for tabla in candidatos:
         tabla_up = tabla.upper()
         if base == tabla_up or base.startswith(tabla_up + "_") or base.startswith(tabla_up + "-") or base.startswith(tabla_up + " "):
             return tabla
+
+    m = re.match(r"^([A-Z]{2,4})[_\-\s]+(\d{1,3})(?!\d)", base)
+    if m:
+        familia, numero = m.group(1), m.group(2)
+        if familia in FAMILIAS_SCR_CONOCIDAS:
+            return f"{familia}_{numero}"
     return None
 
 
